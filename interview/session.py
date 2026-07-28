@@ -54,7 +54,6 @@ def init_state() -> None:
 
     # Timer
     ss.setdefault("timer_seconds", 60)
-    ss.setdefault("timer_enabled", True)
     ss.setdefault("timer_start", None)
     ss.setdefault("timer_question_idx", None)
     ss.setdefault("timer_expired", False)

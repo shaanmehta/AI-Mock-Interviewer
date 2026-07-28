@@ -1,4 +1,4 @@
-"""InteReview AI — spoken mock interviews with employer-style feedback.
+"""InteReviewAI — spoken mock interviews with employer-style feedback.
 
 Free to operate at any traffic level:
 
@@ -39,7 +39,7 @@ from interview.ui import components, results, theme
 from interview.vision import VisionStatus, disabled_face_stats
 
 st.set_page_config(
-    page_title="InteReview AI — Mock Interview Practice",
+    page_title="InteReviewAI — Mock Interview Practice",
     page_icon="🎤",
     layout="centered",
     initial_sidebar_state="collapsed",
@@ -117,11 +117,7 @@ def render_sidebar() -> None:
     with st.sidebar:
         st.markdown("### ⚙️ Settings")
 
-        ss.audio_enabled = st.toggle(
-            "Read questions aloud",
-            value=ss.audio_enabled,
-            help="Uses your browser's built-in voice. Nothing is sent to a server.",
-        )
+        ss.audio_enabled = st.toggle("Read questions aloud", value=ss.audio_enabled)
 
         if settings.allow_user_api_key:
             st.divider()
@@ -129,7 +125,8 @@ def render_sidebar() -> None:
             st.caption(
                 "Optional. This site shares one free rate limit across everyone using "
                 "it. Your own free key skips that queue entirely. It's kept in memory "
-                "for this browser session only — never stored or logged."
+                "for this browser session only. Don't worry, it is never stored or "
+                "logged!"
             )
 
             provider = st.selectbox(
@@ -165,7 +162,7 @@ def render_sidebar() -> None:
                 icon="⚠️",
             )
         st.caption(
-            "InteReview AI gives practice feedback from a language model. "
+            "Note: InteReviewAI gives practice feedback from an LLM. "
             "It is not a hiring decision."
         )
 
@@ -176,19 +173,17 @@ def render_sidebar() -> None:
 
 
 def render_setup() -> None:
-    theme.steps(STEP_LABELS, 0)
+    theme.progress(STEP_LABELS, 0)
     theme.title(
-        "🎤 InteReview AI",
-        "Practise a realistic spoken interview for any field, then get a scored, "
+        "InteReviewAI",
+        "Practice a realistic spoken interview for any field, then get a scored, "
         "employer-style breakdown of how you did.",
     )
 
     with st.form("setup_form"):
         col_a, col_b = st.columns(2, gap="medium")
         with col_a:
-            job_title = st.text_input(
-                "Target role", placeholder="e.g. Robotics Software Intern"
-            )
+            job_field = st.selectbox("Job field", options=settings.job_fields, index=0)
             company_size = st.selectbox(
                 "Company size",
                 ["Startup (1–10)", "Small (11–50)", "Mid (51–300)", "Large (301+)"],
@@ -203,7 +198,6 @@ def render_setup() -> None:
                 ],
             )
         with col_b:
-            job_field = st.selectbox("Job field", options=settings.job_fields, index=0)
             interview_style = st.selectbox(
                 "Interview style",
                 [
@@ -217,17 +211,12 @@ def render_setup() -> None:
                 ["Friendly", "Neutral", "Fast-paced & high standards", "Skeptical (but fair)"],
                 index=1,
             )
-
-        resume_notes = st.text_area(
-            "Anything the interviewer should know (optional)",
-            placeholder="Projects, coursework, or experience you'd like them to probe.",
-            height=110,
-        )
-        n_questions = st.slider("Number of questions", 3, settings.max_questions, 5)
+            n_questions = st.slider("Number of questions", 3, settings.max_questions, 5)
 
         submitted = st.form_submit_button(
             "Continue  →", use_container_width=True, type="primary"
         )
+        theme.button_hint("Or press Enter to submit form")
 
     if submitted:
         if not can_start_interview():
@@ -240,13 +229,11 @@ def render_setup() -> None:
 
         start_new_interview(
             {
-                "job_title": job_title.strip() or "Intern",
                 "job_field": job_field,
                 "company_size": company_size,
                 "interview_style": interview_style,
                 "personality": personality,
                 "experience_level": experience_level,
-                "resume_notes": resume_notes.strip(),
                 "n_questions": int(n_questions),
             }
         )
@@ -263,8 +250,11 @@ def render_setup() -> None:
 def render_media_setup() -> None:
     ss = st.session_state
 
-    theme.steps(STEP_LABELS, 1)
-    theme.title("Recording setup", "Choose how you'd like to be recorded. Both options are scored identically.")
+    theme.progress(STEP_LABELS, 1)
+    theme.title(
+        "Recording setup",
+        "Choose how you'd like to be recorded. Both options are scored identically.",
+    )
 
     # These settings must outlive this page, so the canonical value lives in a
     # plain (non-widget) session_state key and each widget seeds from it and
@@ -289,29 +279,26 @@ def render_media_setup() -> None:
 
     if mode == "mic+cam":
         st.info(
-            "Face analysis runs **entirely in your browser** — video frames never "
-            "leave your device, and nothing is recorded or uploaded. Only a small "
-            "summary (how often you were centered and facing the camera) is used. "
-            "First load downloads roughly 15 MB of model files.",
+            "Face analysis runs entirely in your browser — video frames never leave "
+            "your device, and nothing is recorded or uploaded. Only a small summary "
+            "(how often you were centered and facing the camera) is used.",
             icon="🔒",
         )
     else:
         st.caption(
-            "Microphone-only is a fully supported path — camera analytics are a "
-            "small bonus signal and never affect your score materially."
+            "Microphone-only is a fully supported path. Camera analytics are a small "
+            "bonus signal and never affect your score materially."
         )
 
     st.divider()
 
     col_timer, col_mode = st.columns(2, gap="large")
     with col_timer:
-        ss.timer_enabled = st.toggle("Time limit per answer", value=ss.timer_enabled)
-        if ss.timer_enabled:
-            ss.timer_seconds = st.select_slider(
-                "Seconds per answer", options=[30, 60, 90, 120], value=ss.timer_seconds
-            )
-        else:
-            st.caption("No timer — take as long as you like on each answer.")
+        ss.timer_seconds = st.select_slider(
+            "Time limit per answer (seconds)",
+            options=[30, 60, 90, 120],
+            value=ss.timer_seconds,
+        )
 
     with col_mode:
         stt_choice = st.radio(
@@ -326,13 +313,13 @@ def render_media_setup() -> None:
         ss.stt_mode = stt_choice
         if stt_choice == "browser":
             st.caption(
-                "Fastest option. Uses your browser's built-in speech recognition — "
-                "well supported in Chrome and Edge, unreliable in Safari and Firefox."
+                "Fastest option. Uses your browser's built-in speech recognition. "
+                "Well supported in Chrome and Edge."
             )
         else:
             st.caption(
-                "Works in every browser. Records your answer, then transcribes it "
-                "with a free Whisper endpoint. Slightly slower but more accurate."
+                "Works in every browser. Records your answer and then transcribes it. "
+                "Slightly slower but more accurate."
             )
         if stt_choice == "browser" and _browser_is_safari():
             st.warning(
@@ -408,7 +395,7 @@ def render_camera_panel() -> None:
 def render_timer() -> None:
     """One-second countdown that reruns only itself."""
     ss = st.session_state
-    if not ss.timer_enabled or ss.timer_start is None or ss.timer_expired:
+    if ss.timer_start is None or ss.timer_expired:
         return
 
     remaining = max(0.0, float(ss.timer_seconds) - (time.time() - float(ss.timer_start)))
@@ -523,17 +510,11 @@ def _render_mic(q_idx: int) -> None:
         label_visibility="collapsed",
     )
 
-    col_clear, col_hint = st.columns([1, 2])
-    with col_clear:
-        if st.button("Clear", use_container_width=True, key=f"clear_{q_idx}"):
-            ss.stt_nonce[q_idx] = nonce + 1
-            ss[answer_key] = ""
-            st.rerun()
-    with col_hint:
-        if not (ss.get(answer_key) or "").strip():
-            st.caption("Nothing captured yet.")
-        else:
-            st.caption(f"{len((ss[answer_key] or '').split())} words captured.")
+    captured = (ss.get(answer_key) or "").strip()
+    if captured:
+        st.caption(f"{len(captured.split())} words captured.")
+    else:
+        st.caption("Nothing captured yet.")
 
 
 def render_question() -> None:
@@ -546,12 +527,12 @@ def render_question() -> None:
         submit_current_answer(auto=True)
         return
 
-    theme.steps(STEP_LABELS, 2)
+    theme.progress(STEP_LABELS, 2)
     theme.pills(
         [
             ("Question", f"{q_idx + 1} of {n_questions}"),
-            ("Role", ss.profile.get("job_title", "")),
             ("Field", ss.profile.get("job_field", "")),
+            ("Level", ss.profile.get("experience_level", "")),
         ]
     )
 
@@ -569,16 +550,14 @@ def render_question() -> None:
         return
 
     # Start this question's clock once.
-    if ss.timer_enabled and ss.timer_question_idx != q_idx:
+    if ss.timer_question_idx != q_idx:
         ss.timer_question_idx = q_idx
         ss.timer_start = time.time()
         ss.timer_expired = False
 
     theme.question_card(ss.current_question)
     components.speak(ss.current_question, autoplay=bool(ss.audio_enabled))
-
-    if ss.timer_enabled:
-        render_timer()
+    render_timer()
 
     st.divider()
 
@@ -619,8 +598,12 @@ def render_question() -> None:
 def render_finished() -> None:
     ss = st.session_state
 
-    theme.steps(STEP_LABELS, 3)
-    theme.title("Your interview report", f"{ss.profile.get('job_title', 'Interview')} · {ss.profile.get('job_field', '')}")
+    theme.progress(STEP_LABELS, 3)
+    theme.title(
+        "Your interview report",
+        f"{ss.profile.get('job_field', 'Interview')} · "
+        f"{ss.profile.get('experience_level', '')}",
+    )
 
     if ss.final_result is None and ss.scoring_error is None:
         with st.spinner("The hiring panel is reviewing your answers…"):

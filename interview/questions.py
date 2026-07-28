@@ -37,13 +37,11 @@ def _build_user_message(
         history_lines.append(f"Q{i}: {question}\nA{i}: {answer}")
 
     profile_block = {
-        "job_title": profile.get("job_title", ""),
         "job_field": profile.get("job_field", ""),
         "company_size": profile.get("company_size", ""),
         "interview_style": profile.get("interview_style", ""),
         "interviewer_personality": profile.get("personality", ""),
         "candidate_experience_level": profile.get("experience_level", ""),
-        "resume_notes": profile.get("resume_notes", ""),
         "question_index": question_idx,
         "total_questions": n_questions,
     }

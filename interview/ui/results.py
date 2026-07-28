@@ -12,7 +12,7 @@ from typing import Any, Dict, List
 import plotly.graph_objects as go
 import streamlit as st
 
-from interview.report import build_markdown, build_printable_html
+from interview.report import build_printable_html
 from interview.scoring import RUBRIC_KEYS, RUBRIC_LABELS, RUBRIC_SHORT_LABELS
 from interview.ui import theme
 
@@ -215,27 +215,16 @@ def render(
             if stats.get(key):
                 st.markdown(f"**{label}** — {stats[key]}")
 
-    # ---- Downloads --------------------------------------------------------
+    # ---- Download ----------------------------------------------------------
     theme.section("Take it with you", "📥")
-    markdown = build_markdown(result, profile, qa_history)
     printable = build_printable_html(result, profile, qa_history)
-    slug = (profile.get("job_title") or "interview").lower().replace(" ", "-")[:40]
+    slug = (profile.get("job_field") or "interview").lower().replace(" ", "-")[:40]
 
-    col_md, col_html = st.columns(2)
-    with col_md:
-        st.download_button(
-            "⬇︎  Markdown report",
-            data=markdown,
-            file_name=f"intereview-{slug}.md",
-            mime="text/markdown",
-            use_container_width=True,
-        )
-    with col_html:
-        st.download_button(
-            "⬇︎  Printable report (→ PDF)",
-            data=printable,
-            file_name=f"intereview-{slug}.html",
-            mime="text/html",
-            use_container_width=True,
-            help="Open the file and use your browser's Print → Save as PDF.",
-        )
+    st.download_button(
+        "⬇︎  Printable report (PDF)",
+        data=printable,
+        file_name=f"intereview-{slug}.html",
+        mime="text/html",
+        use_container_width=True,
+    )
+    st.caption("Open the downloaded file and use your browser's Print → Save as PDF.")

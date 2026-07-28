@@ -31,13 +31,12 @@
   button:disabled { opacity: .45; cursor: not-allowed; }
   button.primary { background: #4f7cff; border-color: #4f7cff; color: #fff; }
   button.primary:hover:not(:disabled) { background: #3d6bf0; }
-  select, input[type=range] {
+  select {
     font: inherit; font-size: 13px; color: inherit;
     background: rgba(127, 140, 170, 0.12);
     border: 1px solid rgba(127, 140, 170, 0.30);
     border-radius: 8px; padding: 6px 8px; max-width: 190px;
   }
-  input[type=range] { padding: 0; width: 92px; }
   .muted { font-size: 12px; opacity: .68; }
   .warn {
     font-size: 12.5px; line-height: 1.45; padding: 9px 11px; border-radius: 10px;
@@ -69,7 +68,11 @@
   var root = document.getElementById("root");
 
   var STORE_VOICE = "intereview.tts.voice";
-  var STORE_RATE = "intereview.tts.rate";
+
+  // The only two voices offered. Both ship with macOS/iOS; on other platforms
+  // neither exists, so we fall back to the system default rather than leaving
+  // the user with no voice at all.
+  var ALLOWED = ["Samantha", "Aaron"];
 
   function store(key, value) { try { localStorage.setItem(key, value); } catch (e) {} }
   function load(key, fallback) {
@@ -90,33 +93,48 @@
       '<button id="stop">■ Stop</button>' +
       '<span class="spacer"></span>' +
       '<select id="voice" title="Voice"></select>' +
-      '<label class="muted" title="Speaking rate">Speed ' +
-        '<input id="rate" type="range" min="0.7" max="1.4" step="0.05" />' +
-      '</label>' +
     '</div>';
 
   var playBtn = document.getElementById("play");
   var stopBtn = document.getElementById("stop");
   var voiceSel = document.getElementById("voice");
-  var rateInput = document.getElementById("rate");
-
-  rateInput.value = load(STORE_RATE, "1");
 
   var voices = [];
 
-  function englishFirst(list) {
-    var en = list.filter(function (v) { return /^en/i.test(v.lang); });
-    var rest = list.filter(function (v) { return !/^en/i.test(v.lang); });
-    return en.concat(rest);
+  function pickAllowed(all) {
+    var out = [];
+    ALLOWED.forEach(function (wanted) {
+      var match = all.filter(function (v) {
+        return v.name.indexOf(wanted) !== -1 && /^en[-_]?US/i.test(v.lang);
+      })[0];
+      if (match) out.push(match);
+    });
+    return out;
   }
 
   function populateVoices() {
     var all = synth.getVoices() || [];
     if (!all.length) return false;
-    voices = englishFirst(all);
 
-    var saved = load(STORE_VOICE, "");
+    voices = pickAllowed(all);
     voiceSel.innerHTML = "";
+
+    if (!voices.length) {
+      // Neither allowed voice exists on this platform. Use the browser default
+      // and say so, rather than silently offering a voice we didn't sanction.
+      voiceSel.style.display = "none";
+      if (!document.getElementById("voicenote")) {
+        var note = document.createElement("span");
+        note.id = "voicenote";
+        note.className = "muted";
+        note.textContent = "Default system voice";
+        voiceSel.parentNode.appendChild(note);
+      }
+      return true;
+    }
+
+    voiceSel.style.display = "";
+    var saved = load(STORE_VOICE, "");
     voices.forEach(function (v, i) {
       var opt = document.createElement("option");
       opt.value = String(i);
@@ -148,7 +166,7 @@
     var utter = new SpeechSynthesisUtterance(CFG.text);
     var voice = currentVoice();
     if (voice) { utter.voice = voice; utter.lang = voice.lang; }
-    utter.rate = parseFloat(rateInput.value) || 1;
+    utter.rate = 1;
     utter.pitch = 1;
 
     utter.onstart = function () { playBtn.disabled = true; };
@@ -166,7 +184,6 @@
     var v = currentVoice();
     if (v) store(STORE_VOICE, v.voiceURI || v.name);
   });
-  rateInput.addEventListener("change", function () { store(STORE_RATE, rateInput.value); });
 
   // Autoplay is a best-effort enhancement. Browsers increasingly require a
   // user gesture first; when it's blocked the Play button is still right there,

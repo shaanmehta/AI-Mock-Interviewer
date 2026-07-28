@@ -1,4 +1,4 @@
-# InteReview AI
+# InteReviewAI
 
 A spoken mock-interview app: pick a role from 110+ fields, answer adaptive
 questions out loud, and get a scored, employer-style report at the end.
@@ -66,10 +66,10 @@ Two more found while working, not in the original list:
 
 Rebuilt around a single design system (`.streamlit/config.toml` theme +
 `interview/ui/theme.py`) instead of ad hoc inline HTML scattered through
-`app.py`: a step rail, consistent cards and pills, real loading and error states,
-an honest camera-status chip, and a results dashboard with a rubric chart,
-expandable per-question feedback, and Markdown / print-to-PDF exports. Works down
-to a 375 px phone viewport.
+`app.py`: a stage progress bar, consistent cards and pills, real loading and
+error states, an honest camera-status chip, and a results dashboard with a
+rubric chart, expandable per-question feedback, and a print-to-PDF export. Works
+down to a 375 px phone viewport.
 
 ---
 
@@ -278,5 +278,5 @@ tests/                          Unit tests (60)
 
 ---
 
-InteReview AI gives practice feedback from a language model. It is not a hiring
+InteReviewAI gives practice feedback from a language model. It is not a hiring
 decision, and it should not be used to evaluate real candidates.
