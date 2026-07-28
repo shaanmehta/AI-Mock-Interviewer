@@ -12,6 +12,7 @@ Flow: setup -> media choice -> per-question loop with timer -> scored report.
 
 from __future__ import annotations
 
+import logging
 import time
 
 import streamlit as st
@@ -106,6 +107,7 @@ def _ensure_question() -> bool:
             return True
         except Exception as exc:  # noqa: BLE001 - surfaced as a friendly message
             ss.question_error = _friendly_error(exc)
+            track(analytics.PROVIDER_ERROR, stage="question", kind=type(exc).__name__)
             return False
 
 
@@ -193,6 +195,27 @@ def render_setup() -> None:
         "Practice a realistic spoken interview for any field, then get a scored, "
         "employer-style breakdown of how you did.",
     )
+
+    # Without a provider there is no interview to run: every question and the
+    # final report come from the model. Block here rather than letting someone
+    # get three screens in and hit a wall.
+    if not has_working_key():
+        st.error(
+            "This site can't run an interview right now — no AI provider is "
+            "configured.",
+            icon="🔌",
+        )
+        st.markdown(
+            "**You can start immediately with your own free key:**\n\n"
+            "1. Open [console.groq.com/keys](https://console.groq.com/keys) and "
+            "sign in with GitHub or Google.\n"
+            "2. Create a key (it starts with `gsk_`). No credit card is needed.\n"
+            "3. Paste it into **Settings » → Use your own API key** at the top left."
+        )
+        st.caption(
+            "Your key stays in this browser session only — it is never stored or logged."
+        )
+        return
 
     with st.form("setup_form"):
         col_a, col_b = st.columns(2, gap="medium")
@@ -355,6 +378,16 @@ def render_media_setup() -> None:
             ss.vision_status = (
                 VisionStatus.PENDING if mode == "mic+cam" else VisionStatus.DISABLED
             )
+            track(
+                analytics.INTERVIEW_STARTED,
+                job_field=ss.profile.get("job_field"),
+                experience_level=ss.profile.get("experience_level"),
+                n_questions=ss.profile.get("n_questions"),
+                media_mode=ss.media_mode,
+                stt_mode=ss.stt_mode,
+                timer_seconds=ss.timer_seconds,
+                own_key=using_own_key(),
+            )
             ss.stage = "question"
             st.rerun()
 
@@ -445,12 +478,21 @@ def submit_current_answer(*, auto: bool = False) -> None:
 
     # Face stats for this question, then clear for the next one. This is the
     # snapshot_and_reset() that app.py always called but never existed.
-    if ss.media_mode == "mic+cam":
-        face_stats = ss.vision.snapshot_and_reset(status=ss.vision_status)
-    else:
-        face_stats = disabled_face_stats(VisionStatus.DISABLED)
+    try:
+        if ss.media_mode == "mic+cam":
+            face_stats = ss.vision.snapshot_and_reset(status=ss.vision_status)
+        else:
+            face_stats = disabled_face_stats(VisionStatus.DISABLED)
+    except Exception:  # noqa: BLE001 - a metrics blip must not lose an answer
+        face_stats = disabled_face_stats(VisionStatus.ERROR)
 
     record_answer(ss.current_question, answer, face_stats)
+    track(
+        analytics.QUESTION_ANSWERED,
+        index=int(ss.question_idx),
+        words=len(answer.split()),
+        auto_submitted=auto,
+    )
 
     ss.question_idx += 1
     ss.current_question = ""
@@ -519,6 +561,7 @@ def _render_mic(q_idx: int) -> None:
         "Your answer",
         key=answer_key,
         height=180,
+        max_chars=MAX_ANSWER_CHARS,
         placeholder="Record above, or just type your answer here — both are scored the same.",
         label_visibility="collapsed",
     )
@@ -551,14 +594,13 @@ def render_question() -> None:
 
     if not _ensure_question():
         st.error(ss.question_error, icon="⏳")
-        col_retry, col_skip = st.columns(2)
+        col_retry, col_leave = st.columns(2)
         with col_retry:
             if st.button("↻  Try again", type="primary", use_container_width=True):
                 st.rerun()
-        with col_skip:
-            if st.button("Use a standard question", use_container_width=True):
-                ss.current_question = fallback_question(q_idx)
-                ss.question_error = None
+        with col_leave:
+            if st.button("End interview", use_container_width=True):
+                reset_to_setup()
                 st.rerun()
         return
 
@@ -625,8 +667,18 @@ def render_finished() -> None:
                 ss.final_result = score_full_interview(
                     profile=ss.profile, qa_history=ss.qa, **credentials()
                 )
+                track(
+                    analytics.INTERVIEW_COMPLETED,
+                    job_field=ss.profile.get("job_field"),
+                    experience_level=ss.profile.get("experience_level"),
+                    n_questions=len(ss.qa),
+                    overall_score=ss.final_result.get("overall_score"),
+                    media_mode=ss.media_mode,
+                    repaired=ss.final_result.get("_meta", {}).get("was_repaired"),
+                )
             except Exception as exc:  # noqa: BLE001
                 ss.scoring_error = _friendly_error(exc)
+                track(analytics.SCORING_FAILED, kind=type(exc).__name__)
 
     if ss.scoring_error:
         st.error(ss.scoring_error, icon="⏳")
@@ -659,8 +711,6 @@ def render_finished() -> None:
 # Router
 # ==========================================================================
 
-render_sidebar()
-
 _STAGES = {
     "setup": render_setup,
     "media": render_media_setup,
@@ -668,9 +718,44 @@ _STAGES = {
     "finished": render_finished,
 }
 
-_render = _STAGES.get(st.session_state.stage)
-if _render is None:
-    st.session_state.stage = "setup"
-    st.rerun()
-else:
-    _render()
+
+def _is_admin_request() -> bool:
+    try:
+        return "admin" in st.query_params
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def main() -> None:
+    if _is_admin_request():
+        admin.render()
+        return
+
+    render_sidebar()
+
+    render_stage = _STAGES.get(st.session_state.stage)
+    if render_stage is None:
+        st.session_state.stage = "setup"
+        st.rerun()
+    else:
+        render_stage()
+
+
+# A last-resort boundary. Individual operations already degrade gracefully;
+# this catches anything unforeseen so a stranger sees a recoverable message
+# instead of a broken page. `st.rerun()` raises control-flow exceptions that
+# must be allowed through untouched.
+try:
+    main()
+except Exception as exc:  # noqa: BLE001
+    if type(exc).__name__ in {"RerunException", "StopException"}:
+        raise
+    logging.getLogger("intereview").exception("unhandled error in main()")
+    track(analytics.PROVIDER_ERROR, stage="unhandled", kind=type(exc).__name__)
+    st.error(
+        "Something went wrong on our side. Your progress is safe — please try again.",
+        icon="⚠️",
+    )
+    if st.button("↻  Reload the app", type="primary"):
+        reset_to_setup()
+        st.rerun()

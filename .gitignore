@@ -2,6 +2,10 @@
 .env
 .streamlit/secrets.toml
 
+# Local analytics store (visitor data — never commit)
+analytics.db
+*.db
+
 # Python
 __pycache__/
 *.py[cod]

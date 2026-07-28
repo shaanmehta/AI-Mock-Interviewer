@@ -29,6 +29,14 @@ from typing import Any, Dict, List, Optional
 #: Distance (normalized) from frame centre still counted as "centered".
 CENTER_TOLERANCE = 0.18
 
+#: Hard cap on samples retained per question. The browser component is polite,
+#: but the payload is untrusted: a hostile or buggy client could otherwise post
+#: unbounded batches and grow one session's memory without limit.
+MAX_SAMPLES_PER_QUESTION = 2000
+
+#: Cap on how many samples a single batch may contribute.
+MAX_BATCH_SIZE = 500
+
 
 class VisionStatus(str, Enum):
     """Truthful, per-session state of the browser-side face analyzer."""
@@ -124,11 +132,17 @@ class VisionAggregator:
         return self._total_samples
 
     def update(self, raw: Any) -> bool:
-        """Ingest one raw sample. Returns True when it was accepted."""
+        """Ingest one raw sample. Returns True when it was accepted.
+
+        Once the per-question cap is reached the oldest sample is dropped, so
+        memory stays bounded while the aggregate still reflects recent framing.
+        """
         sample = normalize_sample(raw)
         if sample is None:
             return False
         self._samples.append(sample)
+        if len(self._samples) > MAX_SAMPLES_PER_QUESTION:
+            del self._samples[0]
         self._total_samples += 1
         return True
 
@@ -136,7 +150,7 @@ class VisionAggregator:
         """Ingest a batch of samples, returning how many were accepted."""
         if not isinstance(raws, (list, tuple)):
             return 0
-        return sum(1 for raw in raws if self.update(raw))
+        return sum(1 for raw in raws[:MAX_BATCH_SIZE] if self.update(raw))
 
     def summary_dict(self, *, status: VisionStatus = VisionStatus.RUNNING) -> Dict[str, Any]:
         """Aggregate metrics for the samples collected so far."""

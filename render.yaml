@@ -1,6 +1,13 @@
 # Render blueprint. Commit this, then: Render dashboard -> New -> Blueprint.
-# The free plan supports custom domains + automatic SSL, and hard-suspends
-# rather than billing when limits are hit.
+#
+# The free plan gives a public https://<name>.onrender.com URL with automatic
+# SSL, requires no credit card, and hard-suspends rather than billing when
+# limits are hit. It sleeps after 15 minutes of inactivity (~1 min cold start).
+#
+# The Python version is pinned in `.python-version` (3.12), NOT here. Render's
+# current default is 3.14, where wheels for Streamlit's numpy/pandas/pyarrow
+# dependencies may not exist yet. Do not add a PYTHON_VERSION env var: it
+# overrides `.python-version` and must name an exact patch release.
 services:
   - type: web
     name: intereview-ai
@@ -18,11 +25,17 @@ services:
       --client.showErrorDetails false
     healthCheckPath: /_stcore/health
     envVars:
-      - key: PYTHON_VERSION
-        value: "3.12.7"
-      # Set the real value in the Render dashboard (Environment -> Secret).
-      # sync: false keeps it out of this file and out of git.
+      # Set real values in the Render dashboard (Environment tab).
+      # sync: false keeps them out of this file and out of git.
       - key: GROQ_API_KEY
+        sync: false
+      # Password for the private analytics dashboard at /?admin=1.
+      # Without this, the dashboard refuses to open at all.
+      - key: ANALYTICS_PASSWORD
         sync: false
       - key: ALLOW_USER_API_KEY
         value: "true"
+    # Optional, added by hand later in the dashboard (see DEPLOY.md step 6):
+    #   SUPABASE_URL / SUPABASE_KEY  -> durable analytics storage.
+    # Without them analytics fall back to SQLite on Render's ephemeral disk,
+    # which resets every time the service sleeps or redeploys.

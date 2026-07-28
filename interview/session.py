@@ -73,10 +73,36 @@ def init_state() -> None:
     ss.setdefault("regenerations", 0)
     ss.setdefault("last_call_at", 0.0)
 
+    # Analytics — a random id per browser session, not tied to a person.
+    if "analytics_id" not in ss:
+        ss.analytics_id = analytics.new_session_id()
+        track(analytics.SITE_OPENED)
+
+
+# --------------------------------------------------------------------------
+# Analytics
+# --------------------------------------------------------------------------
+
+
+def track(event: str, **props: Any) -> None:
+    """Record an analytics event for this session. Never raises."""
+    try:
+        analytics.track(st.session_state.get("analytics_id", "unknown"), event, **props)
+    except Exception:  # noqa: BLE001 - analytics must never break a page
+        pass
+
 
 # --------------------------------------------------------------------------
 # Credentials
 # --------------------------------------------------------------------------
+
+
+def has_working_key() -> bool:
+    """True when this session can actually reach a provider.
+
+    Either the deployment ships a real shared key, or the visitor supplied one.
+    """
+    return bool(settings.has_shared_key or using_own_key())
 
 
 def credentials() -> Dict[str, Any]:
@@ -169,10 +195,11 @@ def record_answer(
     question: str, answer: str, face_stats: Dict[str, Any]
 ) -> None:
     """Append one completed Q/A to the transcript."""
+    answer = (answer or "")[:MAX_ANSWER_CHARS]
     words = len(answer.split())
     st.session_state.qa.append(
         {
-            "q": question,
+            "q": (question or "")[:1000],
             "a": answer,
             "voice": {
                 "stt_engine": st.session_state.get("stt_mode", "browser"),

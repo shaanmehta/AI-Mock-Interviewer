@@ -346,16 +346,32 @@ _REPAIR_SYSTEM = (
 )
 
 
+#: Cap on a single answer sent to the scorer. A very long interview can
+#: otherwise exceed the free tier's per-request token limit and fail scoring
+#: outright, which is the one step the user cannot retry their way around.
+MAX_ANSWER_CHARS_FOR_SCORING = 3000
+
+
 def _build_payload(
     profile: Dict[str, Any], transcript: List[Dict[str, Any]]
 ) -> str:
+    trimmed = [
+        {
+            "q": str(item.get("q", ""))[:1000],
+            "a": str(item.get("a", ""))[:MAX_ANSWER_CHARS_FOR_SCORING],
+            "voice": item.get("voice"),
+            "face": item.get("face"),
+        }
+        for item in transcript
+    ]
     return json.dumps(
         {
             "candidate_profile": profile,
-            "transcript": transcript,
+            "transcript": trimmed,
             "note": "voice/face stats are noisy browser-side heuristics; treat cautiously.",
         },
         ensure_ascii=False,
+        default=str,
     )
 
 
