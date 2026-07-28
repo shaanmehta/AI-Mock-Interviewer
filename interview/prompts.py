@@ -89,6 +89,16 @@ EVALUATION RULES
 - The face/voice stats are noisy proxies. Mention them only as gentle,
   clearly-hedged observations. Never let them move the overall score much.
 
+HOW TO SCORE THE RUBRIC
+- Score each axis on a 0-10 scale in steps of 0.5 (for example 6.5, 7, 8.5).
+- Use the WHOLE range. A merely adequate answer is a 5, not a 7. Reserve 9-10
+  for genuinely exceptional responses and use 2-4 freely for weak ones.
+- Judge each axis independently. Do not give every axis a similar number;
+  real candidates are uneven, and the spread between axes is the most useful
+  part of this report.
+- Do not gravitate toward familiar-looking totals. Two different interviews
+  should almost never produce the same set of numbers.
+
 RUBRIC (score each 0-10)
 - clarity: clarity and conciseness
 - structure: STAR for behavioral, systematic approach for technical
@@ -100,7 +110,9 @@ RUBRIC (score each 0-10)
 - listening_followups: did they address what was actually asked
 
 OVERALL SCORE
-- Produce an integer overall_score from 0 to 100. Calibrate like a real employer:
+- Do NOT output an overall score. It is computed from your rubric, so the
+  rubric is what actually determines the result. Put your effort there.
+- For reference, the rubric maps onto these employer bands:
   * 90-100: exceptional / strong hire
   * 75-89:  good / hire or hire-leaning
   * 60-74:  mixed / maybe
@@ -111,16 +123,15 @@ Return a single valid JSON object, and nothing else. Use exactly these keys,
 all lowercase snake_case, matching this shape:
 
 {
-  "overall_score": 78,
   "rubric": {
-    "clarity": 8,
-    "structure": 7,
-    "relevance": 8,
-    "technical_correctness": 7,
-    "depth_tradeoffs": 6,
-    "confidence_professionalism": 8,
-    "evidence_impact": 6,
-    "listening_followups": 7
+    "clarity": <number 0-10, steps of 0.5>,
+    "structure": <number 0-10, steps of 0.5>,
+    "relevance": <number 0-10, steps of 0.5>,
+    "technical_correctness": <number 0-10, steps of 0.5>,
+    "depth_tradeoffs": <number 0-10, steps of 0.5>,
+    "confidence_professionalism": <number 0-10, steps of 0.5>,
+    "evidence_impact": <number 0-10, steps of 0.5>,
+    "listening_followups": <number 0-10, steps of 0.5>
   },
   "summary": "A concise 3-5 sentence hiring-panel verdict.",
   "strengths": ["Specific strength grounded in what they actually said."],
@@ -143,5 +154,7 @@ all lowercase snake_case, matching this shape:
 GUIDANCE
 - Include one entry in question_notes for EVERY question in the transcript, in order.
 - Give 2-4 strengths and 2-4 improvements. Be concrete; avoid generic advice.
-- Every rubric value must be a number from 0 to 10. overall_score must be 0 to 100.
+- Every rubric value must be a number from 0 to 10, in steps of 0.5.
+- The placeholders above are shapes, not examples. Never copy them literally,
+  and never default to a familiar set of numbers.
 """.strip()

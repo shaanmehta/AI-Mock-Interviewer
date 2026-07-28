@@ -4,7 +4,7 @@ Free to operate at any traffic level:
 
 * questions + scoring  -> Groq / Gemini free tier (429s, never a bill)
 * interviewer's voice   -> browser SpeechSynthesis (no server call)
-* candidate's speech    -> browser SpeechRecognition, Groq Whisper fallback
+* candidate's speech    -> recorded in-browser, transcribed by Groq Whisper
 * face analytics        -> MediaPipe WASM in the visitor's browser
 
 Flow: setup -> media choice -> per-question loop with timer -> scored report.
@@ -65,21 +65,6 @@ def _friendly_error(exc: Exception) -> str:
     if isinstance(exc, llm.LLMError):
         return exc.user_message
     return "Something went wrong on our side. Please try again in a moment."
-
-
-def _browser_is_safari() -> bool:
-    """Best-effort UA sniff to pick a sensible default STT mode.
-
-    Safari and some Firefox builds lack usable live SpeechRecognition. This
-    only chooses a *default*; the user can always switch modes by hand.
-    """
-    try:
-        agent = str(st.context.headers.get("User-Agent", ""))
-    except Exception:
-        return False
-    return ("Safari" in agent and "Chrome" not in agent and "Chromium" not in agent) or (
-        "Firefox" in agent
-    )
 
 
 def _ensure_question() -> bool:
@@ -295,10 +280,6 @@ def render_media_setup() -> None:
     # writes back. Binding the widget directly to the canonical key via `key=`
     # loses the value: Streamlit garbage-collects widget state once the widget
     # stops being rendered, which happens as soon as we leave this page.
-    if not ss.get("stt_default_applied"):
-        ss.stt_mode = "upload" if _browser_is_safari() else "browser"
-        ss.stt_default_applied = True
-
     mode = st.radio(
         "Recording mode",
         options=["mic", "mic+cam"],
@@ -334,40 +315,22 @@ def render_media_setup() -> None:
         )
 
     with col_mode:
-        stt_choice = st.radio(
-            "Speech-to-text",
-            options=["browser", "upload"],
-            index=0 if ss.stt_mode == "browser" else 1,
-            format_func=lambda value: {
-                "browser": "Live transcription (Chrome/Edge)",
-                "upload": "Record, then transcribe",
-            }[value],
+        st.markdown("**How your answer is captured**")
+        st.caption(
+            "Record your answer and it is transcribed for you. This works in every "
+            "browser. You can also type your answer instead - typed answers are "
+            "scored exactly the same."
         )
-        ss.stt_mode = stt_choice
-        if stt_choice == "browser":
-            st.caption(
-                "Fastest option. Uses your browser's built-in speech recognition. "
-                "Well supported in Chrome and Edge."
-            )
-        else:
-            st.caption(
-                "Works in every browser. Records your answer and then transcribes it. "
-                "Slightly slower but more accurate."
-            )
-        if stt_choice == "browser" and _browser_is_safari():
-            st.warning(
-                "Your browser may not support live transcription. If the transcript "
-                "stays empty, switch to “Record, then transcribe”.",
-            )
 
     st.divider()
     col_back, col_go = st.columns([1, 2])
     with col_back:
-        if st.button("Back", use_container_width=True):
+        if st.button("Back", use_container_width=True, key="media_back"):
             st.session_state.stage = "setup"
             st.rerun()
     with col_go:
-        if st.button("Start interview", type="primary", use_container_width=True):
+        if st.button("Start interview", type="primary", use_container_width=True,
+                     key="media_start"):
             ss.timer_start = None
             ss.timer_question_idx = None
             ss.timer_expired = False
@@ -503,56 +466,46 @@ def submit_current_answer(*, auto: bool = False) -> None:
 
 
 def _render_mic(q_idx: int) -> None:
-    """The capture panel: live transcription or record-then-transcribe."""
+    """Record the answer, then transcribe it with Groq Whisper.
+
+    There is deliberately only one capture path. The library's ``speech_to_text``
+    helper is *not* browser speech recognition despite its name: it uploads the
+    audio to an undocumented Google demo endpoint from the **server**, over plain
+    HTTP, and swallows every failure. On a shared cloud IP that endpoint is
+    throttled almost immediately, which silently produced empty transcripts and
+    therefore meaningless scores.
+    """
     ss = st.session_state
     answer_key = _current_answer_key()
     ss.setdefault(answer_key, "")
 
     nonce = int(ss.stt_nonce.get(q_idx, 0))
 
-    if ss.stt_mode == "browser":
-        from streamlit_mic_recorder import speech_to_text
+    from streamlit_mic_recorder import mic_recorder
 
-        # Renders only when the browser lacks the Web Speech API.
-        components.speech_support_notice()
-
-        transcript = speech_to_text(
-            language="en",
-            start_prompt="Start talking",
-            stop_prompt="Stop and transcribe",
-            just_once=True,
-            use_container_width=True,
-            key=f"stt_q{q_idx}_{nonce}",
-        )
-        if transcript:
-            existing = (ss[answer_key] or "").strip()
-            ss[answer_key] = f"{existing} {transcript.strip()}".strip()
-    else:
-        from streamlit_mic_recorder import mic_recorder
-
-        recording = mic_recorder(
-            start_prompt="Start recording",
-            stop_prompt="Stop and transcribe",
-            just_once=True,
-            use_container_width=True,
-            format="webm",
-            key=f"rec_q{q_idx}_{nonce}",
-        )
-        if recording and recording.get("bytes"):
-            with st.spinner("Transcribing your answer…"):
-                try:
-                    throttle()
-                    text = transcribe_audio(recording["bytes"], **credentials())
-                    if text:
-                        existing = (ss[answer_key] or "").strip()
-                        ss[answer_key] = f"{existing} {text}".strip()
-                    else:
-                        st.warning(
-                            "That recording was too short to transcribe. Try again, or "
-                            "type your answer below.",
-                        )
-                except Exception as exc:  # noqa: BLE001
-                    st.warning(_friendly_error(exc))
+    recording = mic_recorder(
+        start_prompt="Start recording",
+        stop_prompt="Stop and transcribe",
+        just_once=True,
+        use_container_width=True,
+        format="webm",
+        key=f"rec_q{q_idx}_{nonce}",
+    )
+    if recording and recording.get("bytes"):
+        with st.spinner("Transcribing your answer…"):
+            try:
+                throttle()
+                text = transcribe_audio(recording["bytes"], **credentials())
+                if text:
+                    existing = (ss[answer_key] or "").strip()
+                    ss[answer_key] = f"{existing} {text}".strip()
+                else:
+                    st.warning(
+                        "That recording was too short to transcribe. Try again, or "
+                        "type your answer below.",
+                    )
+            except Exception as exc:  # noqa: BLE001
+                st.warning(_friendly_error(exc))
 
     st.text_area(
         "Your answer",
@@ -593,12 +546,12 @@ def render_question() -> None:
         st.error(ss.question_error)
         col_retry, col_leave = st.columns(2)
         with col_retry:
-            if st.button("Try again", type="primary", use_container_width=True):
+            if st.button("Try again", type="primary", use_container_width=True,
+                         key="retry_question"):
                 st.rerun()
         with col_leave:
-            if st.button("End interview", use_container_width=True):
-                reset_to_setup()
-                st.rerun()
+            st.button("End interview", use_container_width=True,
+                      key="end_interview_error", on_click=reset_to_setup)
         return
 
     # Start this question's clock once.
@@ -628,18 +581,20 @@ def render_question() -> None:
     st.divider()
 
     is_last = q_idx + 1 >= n_questions
+    # Explicit key: the label changes on the last question, which would
+    # otherwise change the widget's generated id and drop the click.
     if st.button(
         "Finish and get my report" if is_last else "Submit answer",
         type="primary",
         use_container_width=True,
+        key=f"submit_answer_{q_idx}",
     ):
         submit_current_answer()
 
     with st.expander("Leave this interview"):
         st.caption("Your progress will be discarded.")
-        if st.button("End interview", use_container_width=True):
-            reset_to_setup()
-            st.rerun()
+        st.button("End interview", use_container_width=True,
+                  key="end_interview", on_click=reset_to_setup)
 
 
 # ==========================================================================
@@ -677,9 +632,8 @@ def render_finished() -> None:
         track(analytics.INTERVIEW_NO_ANSWERS, n_questions=len(ss.qa),
               stt_mode=ss.stt_mode, media_mode=ss.media_mode)
         st.divider()
-        if st.button("Try again", type="primary", use_container_width=True):
-            reset_to_setup()
-            st.rerun()
+        st.button("Try again", type="primary", use_container_width=True,
+                  key="retry_no_answers", on_click=reset_to_setup)
         return
 
     if ss.final_result is None and ss.scoring_error is None:
@@ -706,13 +660,13 @@ def render_finished() -> None:
         st.error(ss.scoring_error)
         col_retry, col_restart = st.columns(2)
         with col_retry:
-            if st.button("Retry scoring", type="primary", use_container_width=True):
+            if st.button("Retry scoring", type="primary", use_container_width=True,
+                         key="retry_scoring"):
                 ss.scoring_error = None
                 st.rerun()
         with col_restart:
-            if st.button("Start over", use_container_width=True):
-                reset_to_setup()
-                st.rerun()
+            st.button("Start over", use_container_width=True,
+                      key="start_over", on_click=reset_to_setup)
 
         with st.expander("See your transcript anyway"):
             for index, item in enumerate(ss.qa, start=1):
@@ -724,9 +678,8 @@ def render_finished() -> None:
         results.render(ss.final_result, ss.profile, ss.qa)
 
     st.divider()
-    if st.button("Start a new interview", use_container_width=True):
-        reset_to_setup()
-        st.rerun()
+    st.button("Start a new interview", use_container_width=True,
+              key="new_interview", on_click=reset_to_setup)
 
 
 # ==========================================================================
@@ -777,6 +730,5 @@ except Exception as exc:  # noqa: BLE001
     st.error(
         "Something went wrong on our side. Your progress is safe — please try again.",
     )
-    if st.button("Reload the app", type="primary"):
-        reset_to_setup()
-        st.rerun()
+    st.button("Reload the app", type="primary",
+              key="reload_app", on_click=reset_to_setup)

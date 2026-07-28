@@ -112,6 +112,34 @@ _RUBRIC_ALIASES = {
 }
 
 
+#: Relative weight of each rubric axis in the overall score. Weighted rather
+#: than a flat mean because employers do not value these equally: what you
+#: actually said (relevance, depth, evidence) outranks how assured you sounded.
+RUBRIC_WEIGHTS: Dict[str, float] = {
+    "clarity": 1.0,
+    "structure": 1.0,
+    "relevance": 1.25,
+    "technical_correctness": 1.0,
+    "depth_tradeoffs": 1.25,
+    "confidence_professionalism": 0.75,
+    "evidence_impact": 1.25,
+    "listening_followups": 1.0,
+}
+
+
+def weighted_overall(rubric: Dict[str, float]) -> float:
+    """Map the eight rubric axes onto a 0-100 score.
+
+    Because axes are scored in 0.5 steps and weighted unevenly, two interviews
+    have to be genuinely similar to land on the same number.
+    """
+    total_weight = sum(RUBRIC_WEIGHTS.values())
+    weighted = sum(
+        float(rubric.get(axis, 0.0)) * weight for axis, weight in RUBRIC_WEIGHTS.items()
+    )
+    return max(0.0, min(100.0, weighted / total_weight * 10.0))
+
+
 def _normalize_key(key: str) -> str:
     return re.sub(r"[^a-z0-9& ]+", " ", str(key).strip().lower()).strip()
 
@@ -266,18 +294,15 @@ def validate_result(raw: Any, *, expected_questions: int = 0) -> Dict[str, Any]:
     for axis in RUBRIC_KEYS:
         if axis not in folded_rubric:
             repaired.append(f"rubric.{axis} missing")
-        rubric[axis] = round(_to_number(folded_rubric.get(axis), 0, 10, 5.0), 1)
+        rubric[axis] = round(_to_number(folded_rubric.get(axis), 0, 10, 5.0) * 2) / 2
 
     # --- overall score ---
-    if "overall_score" in folded and folded["overall_score"] is not None:
-        overall = _to_number(folded["overall_score"], 0, 100, -1)
-    else:
-        overall = -1
-    if overall < 0:
-        # Derive from the rubric rather than showing nothing.
-        overall = round(sum(rubric.values()) / len(rubric) * 10)
-        repaired.append("overall_score derived from rubric")
-    overall = int(round(overall))
+    # Always computed from the rubric, never taken from the model. Asked for a
+    # holistic number directly, the model anchors hard on familiar totals and
+    # returns the same score for every decent interview. The rubric axes do vary
+    # per answer, so deriving from them produces a genuinely tailored score --
+    # and makes the number explainable from the chart the candidate is shown.
+    overall = int(round(weighted_overall(rubric)))
 
     # --- question notes ---
     notes_in = folded.get("question_notes")
@@ -399,7 +424,7 @@ def score_full_interview(
         model=model,
         provider=provider,
         api_key=api_key,
-        temperature=0.2,
+        temperature=0.5,
         json_mode=True,
         max_tokens=4096,
         fallback_model=settings.fallback_model,
@@ -414,7 +439,7 @@ def score_full_interview(
                 system=_REPAIR_SYSTEM,
                 user=(
                     "Convert the following into a single valid JSON object with keys "
-                    "overall_score (0-100 number), rubric (object with numeric keys "
+                    "rubric (object with numeric keys "
                     f"{', '.join(RUBRIC_KEYS)}), summary (string), strengths (array of "
                     "strings), improvements (array of strings), question_notes (array of "
                     "objects with question, answer_excerpt, diagnosis, fixes), and "

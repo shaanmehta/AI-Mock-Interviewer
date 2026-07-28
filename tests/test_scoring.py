@@ -108,7 +108,8 @@ def test_accepts_canonical_snake_case():
     }
     result = validate_result(raw)
     _assert_wellformed(result)
-    assert result["overall_score"] == 82
+    # Derived from the rubric, never taken from the model's own number.
+    assert result["overall_score"] == 80  # every axis 8 -> 80
     assert result["_meta"]["was_repaired"] is False
     assert result["question_notes"][0]["fixes"] == ["Add a result"]
 
@@ -133,16 +134,19 @@ def test_accepts_legacy_capitalized_keys():
     }
     result = validate_result(raw)
     _assert_wellformed(result)
-    assert result["overall_score"] == 77
     assert result["rubric"]["technical_correctness"] == 6
     assert result["rubric"]["listening_followups"] == 7
     assert result["strengths"] == ["Good energy"]
 
 
-def test_derives_overall_score_from_rubric_when_absent():
-    result = validate_result({"rubric": {key: 6 for key in RUBRIC_KEYS}})
-    assert result["overall_score"] == 60
-    assert any("derived" in note for note in result["_meta"]["repaired"])
+def test_overall_score_is_always_derived_from_the_rubric():
+    """The model's own number anchors on familiar totals, so it is ignored."""
+    assert validate_result({"rubric": {key: 6 for key in RUBRIC_KEYS}})["overall_score"] == 60
+    # A wildly wrong model score cannot override the rubric.
+    result = validate_result(
+        {"overall_score": 99, "rubric": {key: 4 for key in RUBRIC_KEYS}}
+    )
+    assert result["overall_score"] == 40
 
 
 def test_clamps_out_of_range_values():
@@ -154,10 +158,7 @@ def test_clamps_out_of_range_values():
 
 
 def test_numeric_strings_are_coerced():
-    result = validate_result(
-        {"overall_score": "Score: 68/100", "rubric": {"clarity": "7 out of 10"}}
-    )
-    assert result["overall_score"] == 68
+    result = validate_result({"rubric": {"clarity": "7 out of 10"}})
     assert result["rubric"]["clarity"] == 7
 
 
@@ -166,3 +167,52 @@ def test_missing_rubric_axes_are_flagged_and_defaulted():
     assert result["rubric"]["clarity"] == 9
     assert result["rubric"]["structure"] == 5  # neutral default
     assert result["_meta"]["was_repaired"] is True
+
+
+# ---- Score variance -------------------------------------------------------
+# The model, asked for a holistic number, returned 82 for almost every decent
+# interview. The score is now a weighted function of the rubric instead.
+
+
+def test_half_point_rubric_values_are_preserved():
+    result = validate_result({"rubric": {key: 7.5 for key in RUBRIC_KEYS}})
+    assert result["rubric"]["clarity"] == 7.5
+    assert result["overall_score"] == 75
+
+
+def test_rubric_values_snap_to_half_points():
+    result = validate_result({"rubric": {"clarity": 7.3, "structure": 6.8}})
+    assert result["rubric"]["clarity"] == 7.5
+    assert result["rubric"]["structure"] == 7.0
+
+
+def test_weighting_favours_substance_over_delivery():
+    """Strong content beats a confident delivery with nothing behind it."""
+    substance = dict.fromkeys(RUBRIC_KEYS, 5.0)
+    substance.update(relevance=9, depth_tradeoffs=9, evidence_impact=9)
+
+    delivery = dict.fromkeys(RUBRIC_KEYS, 5.0)
+    delivery.update(confidence_professionalism=9, clarity=9, structure=9)
+
+    assert (
+        validate_result({"rubric": substance})["overall_score"]
+        > validate_result({"rubric": delivery})["overall_score"]
+    )
+
+
+def test_distinct_rubrics_produce_a_wide_spread_of_scores():
+    """Realistic rubric variation must not collapse onto a few round numbers."""
+    import random
+
+    random.seed(0)
+    scores = set()
+    for _ in range(300):
+        rubric = {k: random.choice([3, 4.5, 5, 6, 6.5, 7, 7.5, 8, 8.5, 9]) for k in RUBRIC_KEYS}
+        scores.add(validate_result({"rubric": rubric})["overall_score"])
+
+    # Near-continuous: essentially every integer in the reachable band occurs,
+    # rather than the handful of round totals the model used to emit.
+    assert len(scores) > 25, f"only {len(scores)} distinct scores"
+    assert max(scores) - min(scores) > 30
+    span = max(scores) - min(scores) + 1
+    assert len(scores) / span > 0.8, "scores cluster instead of spreading"

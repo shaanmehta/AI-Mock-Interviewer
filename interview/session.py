@@ -50,7 +50,7 @@ def init_state() -> None:
     # Media / capture
     ss.setdefault("media_mode", "mic")
     ss.setdefault("stt_nonce", {})
-    ss.setdefault("stt_mode", "browser")        # "browser" or "upload"
+    ss.setdefault("stt_mode", "record_transcribe")  # only capture path
     ss.setdefault("audio_enabled", True)
 
     # Vision — per user, never shared
@@ -209,7 +209,7 @@ def record_answer(
             "a": answer,
             "answered": answer.strip() != NO_ANSWER_PLACEHOLDER and bool(answer.strip()),
             "voice": {
-                "stt_engine": st.session_state.get("stt_mode", "browser"),
+                "stt_engine": st.session_state.get("stt_mode", "record_transcribe"),
                 "words": words,
                 "chars": len(answer),
             },
