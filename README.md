@@ -3,7 +3,7 @@
 A spoken mock-interview app: pick a role from 110+ fields, answer adaptive
 questions out loud, and get a scored, employer-style report at the end.
 
-Click the link below to access the online application:
+Click the link to access the online application:
 https://intereview-ai.onrender.com
 
 ## Or Run it locally
