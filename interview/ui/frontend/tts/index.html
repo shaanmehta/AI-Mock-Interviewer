@@ -1,0 +1,180 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<style>
+  :root { color-scheme: light dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: "Source Sans Pro", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    background: transparent;
+    color: var(--fg, #e8eaf1);
+  }
+  .bar {
+    display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+    padding: 8px 10px; border-radius: 12px;
+    background: rgba(127, 140, 170, 0.10);
+    border: 1px solid rgba(127, 140, 170, 0.22);
+  }
+  button {
+    font: inherit; font-weight: 600; font-size: 13px;
+    padding: 7px 14px; border-radius: 9px; cursor: pointer;
+    border: 1px solid rgba(127, 140, 170, 0.35);
+    background: rgba(127, 140, 170, 0.16); color: inherit;
+    transition: background .15s ease, transform .08s ease;
+    white-space: nowrap;
+  }
+  button:hover:not(:disabled) { background: rgba(127, 140, 170, 0.30); }
+  button:active:not(:disabled) { transform: translateY(1px); }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  button.primary { background: #4f7cff; border-color: #4f7cff; color: #fff; }
+  button.primary:hover:not(:disabled) { background: #3d6bf0; }
+  select, input[type=range] {
+    font: inherit; font-size: 13px; color: inherit;
+    background: rgba(127, 140, 170, 0.12);
+    border: 1px solid rgba(127, 140, 170, 0.30);
+    border-radius: 8px; padding: 6px 8px; max-width: 190px;
+  }
+  input[type=range] { padding: 0; width: 92px; }
+  .muted { font-size: 12px; opacity: .68; }
+  .warn {
+    font-size: 12.5px; line-height: 1.45; padding: 9px 11px; border-radius: 10px;
+    background: rgba(240, 173, 78, 0.13); border: 1px solid rgba(240, 173, 78, 0.35);
+  }
+  .spacer { flex: 1 1 auto; }
+  @media (max-width: 520px) {
+    .bar { gap: 6px; }
+    select { max-width: 130px; }
+    .spacer { display: none; }
+  }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<!-- Python replaces __TTS_CONFIG__ with a JSON object. Kept inside a
+     type="application/json" block so the question text can never be parsed
+     as executable JavaScript. -->
+<script id="cfg" type="application/json">__TTS_CONFIG__</script>
+
+<script>
+(function () {
+  "use strict";
+
+  var CFG = JSON.parse(document.getElementById("cfg").textContent);
+  var synth = window.speechSynthesis;
+  var supported = typeof synth !== "undefined" && typeof window.SpeechSynthesisUtterance !== "undefined";
+  var root = document.getElementById("root");
+
+  var STORE_VOICE = "intereview.tts.voice";
+  var STORE_RATE = "intereview.tts.rate";
+
+  function store(key, value) { try { localStorage.setItem(key, value); } catch (e) {} }
+  function load(key, fallback) {
+    try { var v = localStorage.getItem(key); return v === null ? fallback : v; } catch (e) { return fallback; }
+  }
+
+  if (!supported) {
+    root.innerHTML =
+      '<div class="warn"><b>Your browser can’t speak the question aloud.</b><br>' +
+      'Speech synthesis isn’t available here, so read the question above instead — ' +
+      'nothing else about the interview changes.</div>';
+    return;
+  }
+
+  root.innerHTML =
+    '<div class="bar">' +
+      '<button id="play" class="primary">▶︎ Play question</button>' +
+      '<button id="stop">■ Stop</button>' +
+      '<span class="spacer"></span>' +
+      '<select id="voice" title="Voice"></select>' +
+      '<label class="muted" title="Speaking rate">Speed ' +
+        '<input id="rate" type="range" min="0.7" max="1.4" step="0.05" />' +
+      '</label>' +
+    '</div>';
+
+  var playBtn = document.getElementById("play");
+  var stopBtn = document.getElementById("stop");
+  var voiceSel = document.getElementById("voice");
+  var rateInput = document.getElementById("rate");
+
+  rateInput.value = load(STORE_RATE, "1");
+
+  var voices = [];
+
+  function englishFirst(list) {
+    var en = list.filter(function (v) { return /^en/i.test(v.lang); });
+    var rest = list.filter(function (v) { return !/^en/i.test(v.lang); });
+    return en.concat(rest);
+  }
+
+  function populateVoices() {
+    var all = synth.getVoices() || [];
+    if (!all.length) return false;
+    voices = englishFirst(all);
+
+    var saved = load(STORE_VOICE, "");
+    voiceSel.innerHTML = "";
+    voices.forEach(function (v, i) {
+      var opt = document.createElement("option");
+      opt.value = String(i);
+      opt.textContent = v.name + " (" + v.lang + ")";
+      if (v.voiceURI === saved || v.name === saved) opt.selected = true;
+      voiceSel.appendChild(opt);
+    });
+    return true;
+  }
+
+  // Voice list loads asynchronously in Chrome; retry until it arrives.
+  if (!populateVoices()) {
+    synth.onvoiceschanged = function () { populateVoices(); };
+    var tries = 0;
+    var poll = setInterval(function () {
+      if (populateVoices() || ++tries > 20) clearInterval(poll);
+    }, 150);
+  }
+
+  function currentVoice() {
+    var idx = parseInt(voiceSel.value, 10);
+    return (!isNaN(idx) && voices[idx]) ? voices[idx] : null;
+  }
+
+  function speak() {
+    if (!CFG.text) return;
+    try { synth.cancel(); } catch (e) {}
+
+    var utter = new SpeechSynthesisUtterance(CFG.text);
+    var voice = currentVoice();
+    if (voice) { utter.voice = voice; utter.lang = voice.lang; }
+    utter.rate = parseFloat(rateInput.value) || 1;
+    utter.pitch = 1;
+
+    utter.onstart = function () { playBtn.disabled = true; };
+    utter.onend = utter.onerror = function () { playBtn.disabled = false; };
+
+    try { synth.speak(utter); } catch (e) { playBtn.disabled = false; }
+  }
+
+  playBtn.addEventListener("click", speak);
+  stopBtn.addEventListener("click", function () {
+    try { synth.cancel(); } catch (e) {}
+    playBtn.disabled = false;
+  });
+  voiceSel.addEventListener("change", function () {
+    var v = currentVoice();
+    if (v) store(STORE_VOICE, v.voiceURI || v.name);
+  });
+  rateInput.addEventListener("change", function () { store(STORE_RATE, rateInput.value); });
+
+  // Autoplay is a best-effort enhancement. Browsers increasingly require a
+  // user gesture first; when it's blocked the Play button is still right there,
+  // and the question text is always on screen regardless.
+  if (CFG.autoplay) {
+    setTimeout(speak, 250);
+  }
+})();
+</script>
+</body>
+</html>

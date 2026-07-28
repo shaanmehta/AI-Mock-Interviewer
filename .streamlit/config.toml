@@ -1,0 +1,22 @@
+[theme]
+primaryColor = "#4f7cff"
+backgroundColor = "#0f1219"
+secondaryBackgroundColor = "#171b26"
+textColor = "#e8eaf1"
+font = "sans serif"
+
+[server]
+headless = true
+# Leave enableCORS at its default (true): setting it false is incompatible with
+# enableXsrfProtection, and Streamlit silently overrides it back to true.
+enableXsrfProtection = true
+# Answers are text; the only upload is a short audio clip for fallback STT.
+maxUploadSize = 16
+
+[browser]
+gatherUsageStats = false
+
+[client]
+# Never show Python tracebacks to visitors on a public deployment.
+showErrorDetails = false
+toolbarMode = "minimal"

@@ -1,165 +1,246 @@
-# InteReview AI
+"""InteReview AI — spoken mock interviews with employer-style feedback.
+
+Free to operate at any traffic level:
+
+* questions + scoring  -> Groq / Gemini free tier (429s, never a bill)
+* interviewer's voice   -> browser SpeechSynthesis (no server call)
+* candidate's speech    -> browser SpeechRecognition, Groq Whisper fallback
+* face analytics        -> MediaPipe WASM in the visitor's browser
+
+Flow: setup -> media choice -> per-question loop with timer -> scored report.
+"""
 
 from __future__ import annotations
 
-import threading
 import time
-from typing import Any, Dict, List
 
-import numpy as np
-import av
 import streamlit as st
-from streamlit_mic_recorder import speech_to_text
-from streamlit.components.v1 import html
 
-from streamlit_webrtc import (
-    webrtc_streamer,
-    WebRtcMode,
-    RTCConfiguration,
-    AudioProcessorBase,
-    VideoProcessorBase,
+from interview import llm
+from interview.config import settings
+from interview.questions import fallback_question, generate_next_question
+from interview.scoring import score_full_interview
+from interview.session import (
+    STEP_LABELS,
+    can_regenerate,
+    can_start_interview,
+    credentials,
+    init_state,
+    note_interview_started,
+    note_regeneration,
+    record_answer,
+    reset_to_setup,
+    start_new_interview,
+    throttle,
+    using_own_key,
+)
+from interview.transcribe import transcribe_audio
+from interview.ui import components, results, theme
+from interview.vision import VisionStatus, disabled_face_stats
+
+st.set_page_config(
+    page_title="InteReview AI — Mock Interview Practice",
+    page_icon="🎤",
+    layout="centered",
+    initial_sidebar_state="collapsed",
 )
 
-from interview.config import settings, get_openai_client
-from interview.questions import generate_next_question
-from interview.engine import (
-    tts_autoplay_html,
-    score_full_interview,
-)
-from interview.vision import VisionAggregator, vision_available
-
-
-
-# Constants
-SR = 16000
-SAMPLE_WIDTH = 2  # int16
-BYTES_PER_SEC = SR * SAMPLE_WIDTH
-
-# WebRTC config
-RTC_CONFIG = RTCConfiguration(
-    {"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
-)
-
-# Legacy cosntants
-CHUNK_SECONDS = 2.0
-OVERLAP_SECONDS = 0.5
-CHUNK_BYTES = int(BYTES_PER_SEC * CHUNK_SECONDS)
-OVERLAP_BYTES = int(BYTES_PER_SEC * OVERLAP_SECONDS)
-
-MAX_ANSWER_SECONDS = 90
-MAX_ANSWER_BYTES = BYTES_PER_SEC * MAX_ANSWER_SECONDS
-
-
-# Helpers
-def _jsonable(x: Any) -> Any:
-    try:
-        import numpy as _np
-
-        if isinstance(x, (_np.integer, _np.floating)):
-            return x.item()
-    except Exception:
-        pass
-    if isinstance(x, (str, int, float, bool)) or x is None:
-        return x
-    if isinstance(x, dict):
-        return {str(k): _jsonable(v) for k, v in x.items()}
-    if isinstance(x, (list, tuple)):
-        return [_jsonable(v) for v in x]
-    return str(x)
-
-
-def section_title(title: str, emoji: str = "") -> None:
-    st.markdown(f"### {emoji} {title}".strip())
-
-
-def pill(label: str, value: str) -> None:
-    st.markdown(
-        f"""
-        <div style="display:inline-block;padding:6px 10px;border-radius:999px;
-        border:1px solid rgba(255,255,255,0.15);margin-right:8px;margin-bottom:8px;
-        background:rgba(255,255,255,0.03);font-size:14px;">
-        <b>{label}:</b> {value}
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
-# Video processor (camera)
-class SimpleVideoProcessor(VideoProcessorBase):
-    def __init__(self) -> None:
-        self._latest = None
-
-    def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
-        img = frame.to_ndarray(format="bgr24")
-        self._latest = img
-        return frame
-
-    def get_latest(self):
-        return self._latest
-
-
-# State init
-def init_state() -> None:
-    ss = st.session_state
-    ss.setdefault("stage", "setup")  # setup, media, question, finished
-    ss.setdefault("profile", {})
-    ss.setdefault("question_idx", 0)
-    ss.setdefault("current_question", "")
-    ss.setdefault("qa", [])
-    ss.setdefault("stt_nonce", {})  # Reset counter per question for mic component
-
-    ss.setdefault("vision", VisionAggregator())
-    ss.setdefault("final_result", None)
-
-    ss.setdefault("tts_cache", {})
-    ss.setdefault("audio_enabled", False)
-
-    # Mdia + timer state
-    ss.setdefault("media_mode", None)          # "mic" or "mic+face"
-    ss.setdefault("timer_seconds", 30)         # 30 or 60
-    ss.setdefault("timer_start", None)         # float timestamp
-    ss.setdefault("timer_question_idx", None)  # to reset per question
-    ss.setdefault("timer_auto_submitted", False)
-
-
+theme.inject()
 init_state()
 
 
-# --------------------------
-# Setup page
-# --------------------------
-def render_setup() -> None:
-    st.title("🤖 Mock Interview Robot")
-    st.caption("Mic + Camera interview practice with employer-style feedback.")
+# ==========================================================================
+# Shared helpers
+# ==========================================================================
 
-    c1, c2 = st.columns([1.25, 1], gap="large")
-    with c1:
-        section_title("Interview setup", "🧾")
-        with st.form("setup_form"):
-            job_title = st.text_input("Target role / job title", placeholder="e.g., Robotics Software Intern")
+
+def _friendly_error(exc: Exception) -> str:
+    """Never leak a stack trace or raw provider text to a stranger."""
+    if isinstance(exc, llm.LLMError):
+        return exc.user_message
+    return "Something went wrong on our side. Please try again in a moment."
+
+
+def _browser_is_safari() -> bool:
+    """Best-effort UA sniff to pick a sensible default STT mode.
+
+    Safari and some Firefox builds lack usable live SpeechRecognition. This
+    only chooses a *default*; the user can always switch modes by hand.
+    """
+    try:
+        agent = str(st.context.headers.get("User-Agent", ""))
+    except Exception:
+        return False
+    return ("Safari" in agent and "Chrome" not in agent and "Chromium" not in agent) or (
+        "Firefox" in agent
+    )
+
+
+def _ensure_question() -> bool:
+    """Make sure ``current_question`` is populated. Returns True on success."""
+    ss = st.session_state
+    if ss.current_question:
+        return True
+
+    if not can_regenerate():
+        ss.question_error = (
+            "You've hit this session's question limit. Refresh the page to start fresh."
+        )
+        return False
+
+    with st.spinner("The interviewer is thinking…"):
+        try:
+            throttle()
+            note_regeneration()
+            ss.current_question = generate_next_question(
+                profile=ss.profile,
+                qa_history=ss.qa,
+                question_idx=ss.question_idx,
+                n_questions=int(ss.profile.get("n_questions", 5)),
+                **credentials(),
+            )
+            ss.question_error = None
+            return True
+        except Exception as exc:  # noqa: BLE001 - surfaced as a friendly message
+            ss.question_error = _friendly_error(exc)
+            return False
+
+
+# ==========================================================================
+# Sidebar
+# ==========================================================================
+
+
+def render_sidebar() -> None:
+    ss = st.session_state
+
+    with st.sidebar:
+        st.markdown("### ⚙️ Settings")
+
+        ss.audio_enabled = st.toggle(
+            "Read questions aloud",
+            value=ss.audio_enabled,
+            help="Uses your browser's built-in voice. Nothing is sent to a server.",
+        )
+
+        if settings.allow_user_api_key:
+            st.divider()
+            st.markdown("#### 🔑 Use your own API key")
+            st.caption(
+                "Optional. This site shares one free rate limit across everyone using "
+                "it. Your own free key skips that queue entirely. It's kept in memory "
+                "for this browser session only — never stored or logged."
+            )
+
+            provider = st.selectbox(
+                "Provider",
+                options=list(llm.MODEL_CHOICES.keys()),
+                index=list(llm.MODEL_CHOICES.keys()).index(ss.user_provider)
+                if ss.user_provider in llm.MODEL_CHOICES
+                else 0,
+                key="user_provider",
+            )
+            st.text_input(
+                "API key",
+                type="password",
+                key="user_api_key",
+                placeholder="gsk_… (Groq)" if provider == "groq" else "AIza… (Gemini)",
+            )
+
+            link = (
+                "https://console.groq.com/keys"
+                if provider == "groq"
+                else "https://aistudio.google.com/apikey"
+            )
+            st.caption(f"Get a free key: {link}")
+
+            if using_own_key():
+                st.success("Using your key — no shared rate limit.", icon="✅")
+
+        st.divider()
+        if not settings.has_shared_key and not using_own_key():
+            st.warning(
+                "This deployment has no shared API key configured, so you'll need to "
+                "add your own above to run an interview.",
+                icon="⚠️",
+            )
+        st.caption(
+            "InteReview AI gives practice feedback from a language model. "
+            "It is not a hiring decision."
+        )
+
+
+# ==========================================================================
+# Stage 1 — setup
+# ==========================================================================
+
+
+def render_setup() -> None:
+    theme.steps(STEP_LABELS, 0)
+    theme.title(
+        "🎤 InteReview AI",
+        "Practise a realistic spoken interview for any field, then get a scored, "
+        "employer-style breakdown of how you did.",
+    )
+
+    with st.form("setup_form"):
+        col_a, col_b = st.columns(2, gap="medium")
+        with col_a:
+            job_title = st.text_input(
+                "Target role", placeholder="e.g. Robotics Software Intern"
+            )
+            company_size = st.selectbox(
+                "Company size",
+                ["Startup (1–10)", "Small (11–50)", "Mid (51–300)", "Large (301+)"],
+            )
+            experience_level = st.selectbox(
+                "Your level",
+                [
+                    "Student / New Grad",
+                    "Junior (1–2 yrs)",
+                    "Intermediate (3–5 yrs)",
+                    "Senior (6+ yrs)",
+                ],
+            )
+        with col_b:
             job_field = st.selectbox("Job field", options=settings.job_fields, index=0)
-            company_size = st.selectbox("Company size", ["Startup (1–10)", "Small (11–50)", "Mid (51–300)", "Large (301+)"])
             interview_style = st.selectbox(
                 "Interview style",
-                ["Balanced (Behavioral + Technical)", "Behavioral-heavy", "Technical-heavy"],
+                [
+                    "Balanced (Behavioral + Technical)",
+                    "Behavioral-heavy",
+                    "Technical-heavy",
+                ],
             )
             personality = st.selectbox(
                 "Interviewer personality",
                 ["Friendly", "Neutral", "Fast-paced & high standards", "Skeptical (but fair)"],
                 index=1,
             )
-            experience_level = st.selectbox(
-                "Your level",
-                ["Student / New Grad", "Junior (1–2 yrs)", "Intermediate (3–5 yrs)", "Senior (6+ yrs)"],
-            )
-            resume_notes = st.text_area("Anything the interviewer should know (optional)", height=120)
-            n_questions = st.slider("Number of questions", 3, 8, 5)
-            submitted = st.form_submit_button("🚀 Start interview", use_container_width=True)
 
-        if submitted:
-            st.session_state.profile = {
-                "job_title": (job_title.strip() or "Intern"),
+        resume_notes = st.text_area(
+            "Anything the interviewer should know (optional)",
+            placeholder="Projects, coursework, or experience you'd like them to probe.",
+            height=110,
+        )
+        n_questions = st.slider("Number of questions", 3, settings.max_questions, 5)
+
+        submitted = st.form_submit_button(
+            "Continue  →", use_container_width=True, type="primary"
+        )
+
+    if submitted:
+        if not can_start_interview():
+            st.error(
+                "You've started a lot of interviews in this session. "
+                "Refresh the page to continue.",
+                icon="🛑",
+            )
+            return
+
+        start_new_interview(
+            {
+                "job_title": job_title.strip() or "Intern",
                 "job_field": job_field,
                 "company_size": company_size,
                 "interview_style": interview_style,
@@ -168,316 +249,432 @@ def render_setup() -> None:
                 "resume_notes": resume_notes.strip(),
                 "n_questions": int(n_questions),
             }
-            st.session_state.stage = "media"
-            st.session_state.question_idx = 0
-            st.session_state.qa = []
-            st.session_state.stt_nonce = {}
-
-            st.session_state.final_result = None
-            st.session_state.tts_cache = {}
-            st.session_state.audio_enabled = False
-            st.session_state.vision = VisionAggregator()
-
-            # Pre-generate first question; actual interview starts after media setup
-            st.session_state.current_question = generate_next_question(
-                client=get_openai_client(),
-                profile=st.session_state.profile,
-                qa_history=st.session_state.qa,
-                question_idx=0,
-                n_questions=st.session_state.profile["n_questions"],
-            )
-            st.rerun()
+        )
+        note_interview_started()
+        st.session_state.stage = "media"
+        st.rerun()
 
 
-# Media setup page
+# ==========================================================================
+# Stage 2 — media choice
+# ==========================================================================
+
+
 def render_media_setup() -> None:
     ss = st.session_state
 
-    st.title("🎧 Recording setup")
-    section_title("Recording options", "🎚️")
+    theme.steps(STEP_LABELS, 1)
+    theme.title("Recording setup", "Choose how you'd like to be recorded. Both options are scored identically.")
 
-    media_choice = st.radio(
-        "Choose how you want to be recorded:",
-        options=["Microphone only", "Microphone + Camera"],
-        key="media_choice_radio",
+    # These settings must outlive this page, so the canonical value lives in a
+    # plain (non-widget) session_state key and each widget seeds from it and
+    # writes back. Binding the widget directly to the canonical key via `key=`
+    # loses the value: Streamlit garbage-collects widget state once the widget
+    # stops being rendered, which happens as soon as we leave this page.
+    if not ss.get("stt_default_applied"):
+        ss.stt_mode = "upload" if _browser_is_safari() else "browser"
+        ss.stt_default_applied = True
+
+    mode = st.radio(
+        "Recording mode",
+        options=["mic", "mic+cam"],
+        format_func=lambda value: {
+            "mic": "🎙️  Microphone only",
+            "mic+cam": "🎥  Microphone + camera",
+        }[value],
+        index=0 if ss.media_mode == "mic" else 1,
+        horizontal=True,
     )
+    ss.media_mode = mode
 
-    if media_choice == "Microphone only":
-        ss.media_mode = "mic"
-    elif media_choice == "Microphone + Camera":
-        ss.media_mode = "mic+cam"
-
-    timer_label = st.radio(
-        "Answer time limit per question:",
-        options=["30 seconds", "60 seconds"],
-        index=0,
-        key="timer_choice_radio",
-    )
-    ss.timer_seconds = 30 if timer_label.startswith("30") else 60
-
-    st.caption(
-        "Your microphone (and camera, if selected) will be used during each question. "
-        "Please allow browser permissions if/when prompted."
-    )
-
-    if st.button("Start Interview", type="primary", use_container_width=True):
-        if ss.media_mode is None:
-            st.error("Please choose a recording mode before starting the interview.")
-            return
-
-        # Reset timer state at the start of the interview
-        ss.timer_start = None
-        ss.timer_question_idx = None
-        ss.timer_auto_submitted = False
-
-        ss.stage = "question"
-        st.rerun()
-
-# Submit helper that is reused by the button + timer
-def submit_current_answer() -> None:
-    ss = st.session_state
-
-    profile = ss.profile
-    q_idx = ss.question_idx
-    n_questions = int(profile.get("n_questions", 5))
-    question = ss.current_question
-
-    answer_key = f"answer_text_{q_idx}"
-    answer_text = (ss.get(answer_key, "") or "").strip()
-    if not answer_text:
-        st.error("No transcript captured yet. Click Start, speak, then click Stop.")
-        return
-
-    # Keep a lightweight "voice" payload for downstream scoring 
-    # Note: Do not store audio
-    voice_stats = {
-        "stt_engine": "streamlit_mic_recorder",
-        "words": int(len(answer_text.split())),
-        "chars": int(len(answer_text)),
-    }
-
-    if vision_available:
-        try:
-            snap = ss.vision.snapshot_and_reset()
-            face_stats = _jsonable(snap.to_dict() if hasattr(snap, "to_dict") else snap)
-        except Exception:
-            face_stats = {"vision_enabled": True, "error": "snapshot failed"}
+    if mode == "mic+cam":
+        st.info(
+            "Face analysis runs **entirely in your browser** — video frames never "
+            "leave your device, and nothing is recorded or uploaded. Only a small "
+            "summary (how often you were centered and facing the camera) is used. "
+            "First load downloads roughly 15 MB of model files.",
+            icon="🔒",
+        )
     else:
-        face_stats = {"vision_enabled": False}
-
-    ss.qa.append(
-        {"q": question, "a": answer_text, "voice": _jsonable(voice_stats), "face": _jsonable(face_stats)}
-    )
-
-    next_idx = q_idx + 1
-    ss.question_idx = next_idx
-
-    if next_idx >= n_questions:
-        ss.stage = "finished"
-        st.rerun()
-
-    ss.current_question = generate_next_question(
-        client=get_openai_client(),
-        profile=profile,
-        qa_history=ss.qa,
-        question_idx=next_idx,
-        n_questions=n_questions,
-    )
-    st.rerun()
-
-# Interview page
-def render_question() -> None:
-    profile = st.session_state.profile
-    q_idx = st.session_state.question_idx
-    n_questions = int(profile.get("n_questions", 5))
-    question = st.session_state.current_question
-
-    st.title("🎤 Interview in progress")
-
-    top = st.columns([1.2, 1, 1], gap="small")
-    with top[0]:
-        pill("Role", profile.get("job_title", ""))
-    with top[1]:
-        pill("Field", profile.get("job_field", ""))
-    with top[2]:
-        pill("Question", f"{q_idx + 1} / {n_questions}")
-
-    st.divider()
-
-    section_title("Question", "🗣️")
-    st.markdown(
-        f"""
-        <div style="padding:18px;border-radius:18px;background:rgba(255,255,255,0.04);
-        border:1px solid rgba(255,255,255,0.08);font-size:18px;line-height:1.35;">
-        <b>Interviewer:</b> {question}
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    # TTS cache per question
-    q_key = f"q_{q_idx}"
-    if q_key not in st.session_state.tts_cache:
-        try:
-            st.session_state.tts_cache[q_key] = tts_autoplay_html(get_openai_client(), question)
-        except Exception as e:
-            st.session_state.tts_cache[q_key] = f"<div style='color:#ffb4b4'>TTS error: {e}</div>"
-
-    if st.session_state.audio_enabled:
-        html(st.session_state.tts_cache[q_key], height=120)
-    else:
-        html(st.session_state.tts_cache[q_key].replace("autoplay", ""), height=120)
-
-    if st.button("🔊 Replay question", use_container_width=True):
-        html(st.session_state.tts_cache[q_key], height=120)
-
-    st.divider()
-
-    colL, colR = st.columns([1.1, 0.9], gap="large")
-
-    # ---- MIC (Start/Stop Speech-to-Text) ----
-    with colL:
-        section_title("Mic (start/stop speech-to-text)", "🎙️")
-        st.write("1. Click **Start talking**.")
-        st.write("2. Allow microphone access if prompted.")
-        st.write("3. Speak your full answer, then click **Stop**.")
-        st.write("4. The transcript will be inserted into the box below.")
-
-        answer_key = f"answer_text_{q_idx}"
-        if answer_key not in st.session_state:
-            st.session_state[answer_key] = ""
-
-        # Per-question reset counter so the mic component can be restarted reliably.
-        nonce = int(st.session_state.stt_nonce.get(q_idx, 0))
-        stt_key = f"stt_q{q_idx}_{nonce}"
-
-        if st.button("🔁 Record again (reset)", use_container_width=True, key=f"reset_stt_{q_idx}"):
-            st.session_state.stt_nonce[q_idx] = nonce + 1
-            st.session_state[answer_key] = ""
-            st.rerun()
-
-        stt_text = speech_to_text(
-            language="en",
-            start_prompt="🎙️ Start talking",
-            stop_prompt="⏹️ Stop",
-            just_once=True,
-            use_container_width=True,
-            key=stt_key,
+        st.caption(
+            "Microphone-only is a fully supported path — camera analytics are a "
+            "small bonus signal and never affect your score materially."
         )
 
-        # When the user clicks Stop, speech_to_text returns the transcript once.
-        if stt_text:
-            st.session_state[answer_key] = (stt_text or "").strip()
-
-        st.text_area("Transcript", key=answer_key, height=220)
-
-        if not (st.session_state.get(answer_key) or "").strip():
-            st.caption("No transcript yet. Record your answer, then click Stop.")
-
-    # CAMERA (gated by media_mode)
-    with colR:
-        section_title("Camera preview", "📷")
-        media_mode = st.session_state.get("media_mode") or "mic"
-        if media_mode == "mic+face":
-            video_ctx = webrtc_streamer(
-                key=f"cam_{q_idx}",
-                mode=WebRtcMode.SENDRECV,
-                rtc_configuration=RTC_CONFIG,
-                media_stream_constraints={"video": True, "audio": False},
-                async_processing=True,
-                video_processor_factory=SimpleVideoProcessor,
-            )
-
-            # Feed frames into vision aggregator
-            if vision_available and video_ctx and video_ctx.state.playing and video_ctx.video_processor:
-                frame = video_ctx.video_processor.get_latest()
-                if frame is not None:
-                    try:
-                        st.session_state.vision.update(frame)
-                    except Exception:
-                        pass
-        else:
-            st.caption("Camera disabled (microphone-only mode).")
-
-    # TIMER (per question, auto-submit if it runs out)
-    ss = st.session_state
-    current_q_idx = q_idx
-
-    if ss.timer_question_idx != current_q_idx:
-        ss.timer_question_idx = current_q_idx
-        ss.timer_start = time.time()
-        ss.timer_auto_submitted = False
-
-    if ss.timer_start is not None:
-        elapsed = time.time() - ss.timer_start
-        remaining = int(ss.timer_seconds - elapsed)
-        if remaining < 0:
-            remaining = 0
-
-        col_time, col_bar = st.columns([1, 3])
-        with col_time:
-            st.metric("Time left (s)", remaining)
-        with col_bar:
-            st.progress(
-                max(0.0, min(1.0, remaining / float(ss.timer_seconds))),
-                text="Answer time remaining",
-            )
-
-        if remaining <= 0 and not ss.timer_auto_submitted:
-            ss.timer_auto_submitted = True
-            submit_current_answer()
-            return
-
     st.divider()
 
-    if st.button("✅ Submit Answer", type="primary", use_container_width=True):
-        submit_current_answer()
+    col_timer, col_mode = st.columns(2, gap="large")
+    with col_timer:
+        ss.timer_enabled = st.toggle("Time limit per answer", value=ss.timer_enabled)
+        if ss.timer_enabled:
+            ss.timer_seconds = st.select_slider(
+                "Seconds per answer", options=[30, 60, 90, 120], value=ss.timer_seconds
+            )
+        else:
+            st.caption("No timer — take as long as you like on each answer.")
 
-# Finished page + scoring
-def render_finished() -> None:
-    st.title("🏁 Interview complete")
+    with col_mode:
+        stt_choice = st.radio(
+            "Speech-to-text",
+            options=["browser", "upload"],
+            index=0 if ss.stt_mode == "browser" else 1,
+            format_func=lambda value: {
+                "browser": "Live transcription (Chrome/Edge)",
+                "upload": "Record, then transcribe",
+            }[value],
+        )
+        ss.stt_mode = stt_choice
+        if stt_choice == "browser":
+            st.caption(
+                "Fastest option. Uses your browser's built-in speech recognition — "
+                "well supported in Chrome and Edge, unreliable in Safari and Firefox."
+            )
+        else:
+            st.caption(
+                "Works in every browser. Records your answer, then transcribes it "
+                "with a free Whisper endpoint. Slightly slower but more accurate."
+            )
+        if stt_choice == "browser" and _browser_is_safari():
+            st.warning(
+                "Your browser may not support live transcription. If the transcript "
+                "stays empty, switch to “Record, then transcribe”.",
+                icon="⚠️",
+            )
 
-    if st.session_state.final_result is None:
-        with st.spinner("Scoring your interview..."):
-            try:
-                st.session_state.final_result = score_full_interview(
-                    client=get_openai_client(),
-                    profile=st.session_state.profile,
-                    qa_history=st.session_state.qa,
-                )
-            except Exception as e:
-                st.session_state.final_result = {"error": str(e)}
+    st.divider()
+    col_back, col_go = st.columns([1, 2])
+    with col_back:
+        if st.button("←  Back", use_container_width=True):
+            st.session_state.stage = "setup"
+            st.rerun()
+    with col_go:
+        if st.button("Start interview  →", type="primary", use_container_width=True):
+            ss.timer_start = None
+            ss.timer_question_idx = None
+            ss.timer_expired = False
+            ss.vision_status = (
+                VisionStatus.PENDING if mode == "mic+cam" else VisionStatus.DISABLED
+            )
+            ss.stage = "question"
+            st.rerun()
 
-    result = st.session_state.final_result or {}
-    if "error" in result:
-        st.error(f"Scoring failed: {result['error']}")
+
+# ==========================================================================
+# Stage 3 — the interview loop
+# ==========================================================================
+
+
+@st.fragment
+def render_camera_panel() -> None:
+    """Browser-side face analysis.
+
+    Lives in a fragment so the component's periodic posts rerun only this
+    panel — the mic recorder and the transcript box are never disturbed.
+    """
+    ss = st.session_state
+
+    payload = components.face_monitor(
+        active=True, question_idx=int(ss.question_idx), key="face_monitor"
+    )
+
+    if isinstance(payload, dict):
+        raw_status = str(payload.get("status", "pending"))
+        try:
+            ss.vision_status = VisionStatus(raw_status)
+        except ValueError:
+            ss.vision_status = VisionStatus.ERROR
+
+        batch_id = int(payload.get("batch_id", -1))
+        if batch_id > int(ss.vision_last_batch):
+            ss.vision_last_batch = batch_id
+            ss.vision.ingest_many(payload.get("samples"))
+
+    status: VisionStatus = ss.vision_status
+    tone = {
+        VisionStatus.RUNNING: "ok",
+        VisionStatus.PENDING: "warn",
+        VisionStatus.DISABLED: "off",
+    }.get(status, "bad")
+    theme.status_chip(status.label, tone)
+
+    if status in (VisionStatus.UNSUPPORTED, VisionStatus.PERMISSION_DENIED, VisionStatus.ERROR):
+        st.caption(
+            "No problem — your answers are scored on what you say, not how you look. "
+            "The rest of the interview works exactly the same."
+        )
+
+
+@st.fragment(run_every=1)
+def render_timer() -> None:
+    """One-second countdown that reruns only itself."""
+    ss = st.session_state
+    if not ss.timer_enabled or ss.timer_start is None or ss.timer_expired:
         return
 
-    section_title("Results", "📊")
-    st.json(result)
+    remaining = max(0.0, float(ss.timer_seconds) - (time.time() - float(ss.timer_start)))
+    fraction = remaining / float(ss.timer_seconds) if ss.timer_seconds else 0.0
+
+    minutes, seconds = divmod(int(remaining), 60)
+    st.progress(
+        max(0.0, min(1.0, fraction)),
+        text=f"⏱️  {minutes}:{seconds:02d} left on this answer",
+    )
+
+    if remaining <= 0:
+        ss.timer_expired = True
+        st.rerun(scope="app")
+
+
+def _current_answer_key() -> str:
+    return f"answer_text_{st.session_state.question_idx}"
+
+
+def submit_current_answer(*, auto: bool = False) -> None:
+    """Record the answer, advance, and prepare the next question."""
+    ss = st.session_state
+    answer = (ss.get(_current_answer_key(), "") or "").strip()
+
+    if not answer:
+        if not auto:
+            st.error(
+                "No answer captured yet. Record your response, or type it into the box.",
+                icon="🎙️",
+            )
+            return
+        answer = "(No answer was given before time ran out.)"
+
+    # Face stats for this question, then clear for the next one. This is the
+    # snapshot_and_reset() that app.py always called but never existed.
+    if ss.media_mode == "mic+cam":
+        face_stats = ss.vision.snapshot_and_reset(status=ss.vision_status)
+    else:
+        face_stats = disabled_face_stats(VisionStatus.DISABLED)
+
+    record_answer(ss.current_question, answer, face_stats)
+
+    ss.question_idx += 1
+    ss.current_question = ""
+    ss.question_error = None
+    ss.timer_expired = False
+    ss.timer_start = None
+    ss.timer_question_idx = None
+
+    if ss.question_idx >= int(ss.profile.get("n_questions", 5)):
+        ss.stage = "finished"
+
+    st.rerun()
+
+
+def _render_mic(q_idx: int) -> None:
+    """The capture panel: live transcription or record-then-transcribe."""
+    ss = st.session_state
+    answer_key = _current_answer_key()
+    ss.setdefault(answer_key, "")
+
+    nonce = int(ss.stt_nonce.get(q_idx, 0))
+
+    if ss.stt_mode == "browser":
+        from streamlit_mic_recorder import speech_to_text
+
+        transcript = speech_to_text(
+            language="en",
+            start_prompt="🎙️  Start talking",
+            stop_prompt="⏹️  Stop and transcribe",
+            just_once=True,
+            use_container_width=True,
+            key=f"stt_q{q_idx}_{nonce}",
+        )
+        if transcript:
+            existing = (ss[answer_key] or "").strip()
+            ss[answer_key] = f"{existing} {transcript.strip()}".strip()
+    else:
+        from streamlit_mic_recorder import mic_recorder
+
+        recording = mic_recorder(
+            start_prompt="🎙️  Start recording",
+            stop_prompt="⏹️  Stop and transcribe",
+            just_once=True,
+            use_container_width=True,
+            format="webm",
+            key=f"rec_q{q_idx}_{nonce}",
+        )
+        if recording and recording.get("bytes"):
+            with st.spinner("Transcribing your answer…"):
+                try:
+                    throttle()
+                    text = transcribe_audio(recording["bytes"], **credentials())
+                    if text:
+                        existing = (ss[answer_key] or "").strip()
+                        ss[answer_key] = f"{existing} {text}".strip()
+                    else:
+                        st.warning(
+                            "That recording was too short to transcribe. Try again, or "
+                            "type your answer below.",
+                            icon="🎙️",
+                        )
+                except Exception as exc:  # noqa: BLE001
+                    st.warning(_friendly_error(exc), icon="⚠️")
+
+    st.text_area(
+        "Your answer",
+        key=answer_key,
+        height=180,
+        placeholder="Record above, or just type your answer here — both are scored the same.",
+        label_visibility="collapsed",
+    )
+
+    col_clear, col_hint = st.columns([1, 2])
+    with col_clear:
+        if st.button("Clear", use_container_width=True, key=f"clear_{q_idx}"):
+            ss.stt_nonce[q_idx] = nonce + 1
+            ss[answer_key] = ""
+            st.rerun()
+    with col_hint:
+        if not (ss.get(answer_key) or "").strip():
+            st.caption("Nothing captured yet.")
+        else:
+            st.caption(f"{len((ss[answer_key] or '').split())} words captured.")
+
+
+def render_question() -> None:
+    ss = st.session_state
+    q_idx = int(ss.question_idx)
+    n_questions = int(ss.profile.get("n_questions", 5))
+
+    # An expired timer submits before anything else renders.
+    if ss.timer_expired:
+        submit_current_answer(auto=True)
+        return
+
+    theme.steps(STEP_LABELS, 2)
+    theme.pills(
+        [
+            ("Question", f"{q_idx + 1} of {n_questions}"),
+            ("Role", ss.profile.get("job_title", "")),
+            ("Field", ss.profile.get("job_field", "")),
+        ]
+    )
+
+    if not _ensure_question():
+        st.error(ss.question_error, icon="⏳")
+        col_retry, col_skip = st.columns(2)
+        with col_retry:
+            if st.button("↻  Try again", type="primary", use_container_width=True):
+                st.rerun()
+        with col_skip:
+            if st.button("Use a standard question", use_container_width=True):
+                ss.current_question = fallback_question(q_idx)
+                ss.question_error = None
+                st.rerun()
+        return
+
+    # Start this question's clock once.
+    if ss.timer_enabled and ss.timer_question_idx != q_idx:
+        ss.timer_question_idx = q_idx
+        ss.timer_start = time.time()
+        ss.timer_expired = False
+
+    theme.question_card(ss.current_question)
+    components.speak(ss.current_question, autoplay=bool(ss.audio_enabled))
+
+    if ss.timer_enabled:
+        render_timer()
 
     st.divider()
-    if st.button("↩️ Start a new interview", use_container_width=True):
-        st.session_state.stage = "setup"
-        st.session_state.question_idx = 0
-        st.session_state.qa = []
-        st.session_state.current_question = ""
-        st.session_state.final_result = None
-        st.session_state.tts_cache = {}
-        st.session_state.stt_nonce = {}
-        st.session_state.vision = VisionAggregator()
+
+    if ss.media_mode == "mic+cam":
+        col_answer, col_cam = st.columns([1.35, 1], gap="large")
+        with col_answer:
+            theme.section("Your answer", "🎙️")
+            _render_mic(q_idx)
+        with col_cam:
+            theme.section("Camera", "📷")
+            render_camera_panel()
+    else:
+        theme.section("Your answer", "🎙️")
+        _render_mic(q_idx)
+
+    st.divider()
+
+    is_last = q_idx + 1 >= n_questions
+    if st.button(
+        "Finish and get my report  →" if is_last else "Submit answer  →",
+        type="primary",
+        use_container_width=True,
+    ):
+        submit_current_answer()
+
+    with st.expander("Leave this interview"):
+        st.caption("Your progress will be discarded.")
+        if st.button("End interview", use_container_width=True):
+            reset_to_setup()
+            st.rerun()
+
+
+# ==========================================================================
+# Stage 4 — results
+# ==========================================================================
+
+
+def render_finished() -> None:
+    ss = st.session_state
+
+    theme.steps(STEP_LABELS, 3)
+    theme.title("Your interview report", f"{ss.profile.get('job_title', 'Interview')} · {ss.profile.get('job_field', '')}")
+
+    if ss.final_result is None and ss.scoring_error is None:
+        with st.spinner("The hiring panel is reviewing your answers…"):
+            try:
+                throttle()
+                ss.final_result = score_full_interview(
+                    profile=ss.profile, qa_history=ss.qa, **credentials()
+                )
+            except Exception as exc:  # noqa: BLE001
+                ss.scoring_error = _friendly_error(exc)
+
+    if ss.scoring_error:
+        st.error(ss.scoring_error, icon="⏳")
+        col_retry, col_restart = st.columns(2)
+        with col_retry:
+            if st.button("↻  Retry scoring", type="primary", use_container_width=True):
+                ss.scoring_error = None
+                st.rerun()
+        with col_restart:
+            if st.button("Start over", use_container_width=True):
+                reset_to_setup()
+                st.rerun()
+
+        with st.expander("See your transcript anyway"):
+            for index, item in enumerate(ss.qa, start=1):
+                st.markdown(f"**Q{index}.** {item.get('q', '')}")
+                st.markdown(f"> {item.get('a', '') or '_(no answer)_'}")
+        return
+
+    if ss.final_result:
+        results.render(ss.final_result, ss.profile, ss.qa)
+
+    st.divider()
+    if st.button("↩︎  Start a new interview", use_container_width=True):
+        reset_to_setup()
         st.rerun()
 
+
+# ==========================================================================
 # Router
-stage = st.session_state.stage
-if stage == "setup":
-    render_setup()
-elif stage == "media":
-    render_media_setup()
-elif stage == "question":
-    render_question()
-elif stage == "finished":
-    render_finished()
-else:
+# ==========================================================================
+
+render_sidebar()
+
+_STAGES = {
+    "setup": render_setup,
+    "media": render_media_setup,
+    "question": render_question,
+    "finished": render_finished,
+}
+
+_render = _STAGES.get(st.session_state.stage)
+if _render is None:
     st.session_state.stage = "setup"
     st.rerun()
+else:
+    _render()

@@ -1,210 +1,208 @@
-# Face analysis for the InterReview AI
+"""Face analytics aggregation.
 
-# Design:
-# Externally, show `vision_available` as True so that the app UI does not spam
-# "Vision unavailable (cv2/mediapipe missing)" and annoy the.
-# Internally, attempt to import cv2 + mediapipe.
-#      If available, run real face detection.
-#       If not, return neutral metrics.
+**All face detection now runs in the visitor's own browser** (MediaPipe
+``tasks-vision`` WASM, see ``interview/ui/frontend/face_monitor``). The server
+receives only small aggregate JSON samples. Nothing here imports OpenCV or
+MediaPipe, and the server does zero per-frame CPU work — which is the only way
+this feature scales to arbitrary concurrent strangers on a free host.
 
-# The rest of the app imports:
-#   from interview.vision import VisionAggregator, vision_available
+What changed from the previous version
+--------------------------------------
+* ``snapshot_and_reset()`` now exists. ``app.py`` called it on every answer
+  submission, but it was never implemented, so face analytics silently failed
+  for every user and always produced ``{"error": "snapshot failed"}``.
+* ``vision_available`` is no longer hardcoded ``True``. Availability is a real,
+  per-browser runtime fact reported by the component handshake, tracked in
+  :class:`VisionStatus`, and shown honestly in the UI.
+* The module-level ``_global_vision`` singleton and ``analyze_face()`` helper
+  are gone. A mutable module global is shared by every concurrent visitor in a
+  Streamlit process; all per-user state now lives in ``st.session_state``.
+"""
 
 from __future__ import annotations
 
-from dataclasses import dataclass, asdict
-from typing import Dict, Optional
+import statistics
+from dataclasses import dataclass
+from enum import Enum
+from typing import Any, Dict, List, Optional
 
-import numpy as np
-
-# Optional OpenCV import
-try:
-    import cv2  # type: ignore[import-not-found]
-    _HAVE_CV2 = True
-except Exception:
-    cv2 = None  # type: ignore[assignment]
-    _HAVE_CV2 = False
-
-# Optional MediaPipe import
-try:
-    import mediapipe as mp  # type: ignore[import-not-found]
-    mp_face_detection = mp.solutions.face_detection
-    _HAVE_MEDIAPIPE = True
-except Exception:
-    mp = None  # type: ignore[assignment]
-    mp_face_detection = None  # type: ignore[assignment]
-    _HAVE_MEDIAPIPE = False
-
-# Public flag used by app.py
-# Force this to True so the UI does not show "vision unavailable" message
-vision_available: bool = True
+#: Distance (normalized) from frame centre still counted as "centered".
+CENTER_TOLERANCE = 0.18
 
 
-# Data classes for metrics
-@dataclass
-class FrameFaceMetrics:
-    """Per-frame face metrics."""
+class VisionStatus(str, Enum):
+    """Truthful, per-session state of the browser-side face analyzer."""
 
-    num_faces: int = 0
-    max_confidence: float = 0.0
-    mean_confidence: float = 0.0
-    is_centered: bool = False  # whether the most confident face is near center
+    DISABLED = "disabled"          # user chose microphone-only
+    PENDING = "pending"            # component mounted, awaiting handshake
+    UNSUPPORTED = "unsupported"    # browser lacks WASM/getUserMedia support
+    PERMISSION_DENIED = "denied"   # user declined camera access
+    ERROR = "error"                # model/CDN load failed
+    RUNNING = "running"            # actively producing samples
+
+    @property
+    def is_working(self) -> bool:
+        return self is VisionStatus.RUNNING
+
+    @property
+    def label(self) -> str:
+        return {
+            VisionStatus.DISABLED: "Camera off",
+            VisionStatus.PENDING: "Starting camera…",
+            VisionStatus.UNSUPPORTED: "Not supported in this browser",
+            VisionStatus.PERMISSION_DENIED: "Camera permission denied",
+            VisionStatus.ERROR: "Face analysis failed to load",
+            VisionStatus.RUNNING: "Face analysis active",
+        }[self]
 
 
 @dataclass
-class AggregatedFaceMetrics:
-    """Aggregated metrics across multiple frames."""
+class FaceSample:
+    """One browser-side observation. Field names mirror the JS payload."""
 
-    frames_processed: int = 0
-    total_faces: int = 0
-    accumulated_confidence: float = 0.0
-
-    @property
-    def avg_faces_per_frame(self) -> float:
-        if self.frames_processed == 0:
-            return 0.0
-        return self.total_faces / self.frames_processed
-
-    @property
-    def avg_confidence(self) -> float:
-        if self.frames_processed == 0 or self.total_faces == 0:
-            return 0.0
-        return self.accumulated_confidence / max(self.total_faces, 1)
-
-    def to_dict(self) -> Dict:
-        base = asdict(self)
-        base["avg_faces_per_frame"] = self.avg_faces_per_frame
-        base["avg_confidence"] = self.avg_confidence
-        return base
+    face: bool = False
+    score: float = 0.0
+    cx: float = 0.5
+    cy: float = 0.5
+    centered: bool = False
+    eye_contact: bool = False
 
 
-# Vision aggregator
+def _clamp(value: Any, low: float, high: float, default: float) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return default
+    if number != number:  # NaN
+        return default
+    return max(low, min(high, number))
+
+
+def normalize_sample(raw: Any) -> Optional[FaceSample]:
+    """Validate one untrusted sample from the browser.
+
+    Returns ``None`` when the payload is unusable, so malformed client data can
+    never corrupt the aggregate.
+    """
+    if not isinstance(raw, dict):
+        return None
+
+    face = bool(raw.get("face"))
+    cx = _clamp(raw.get("cx"), 0.0, 1.0, 0.5)
+    cy = _clamp(raw.get("cy"), 0.0, 1.0, 0.5)
+
+    centered = raw.get("centered")
+    if not isinstance(centered, bool):
+        centered = abs(cx - 0.5) <= CENTER_TOLERANCE and abs(cy - 0.5) <= CENTER_TOLERANCE
+
+    return FaceSample(
+        face=face,
+        score=_clamp(raw.get("score"), 0.0, 1.0, 0.0),
+        cx=cx,
+        cy=cy,
+        centered=bool(face and centered),
+        eye_contact=bool(face and raw.get("eye_contact")),
+    )
+
+
 class VisionAggregator:
+    """Accumulates browser-reported samples for the current question.
 
-    # Wrapper around optional MediaPipe Face Detection with simple aggregation.
-    # If cv2 or mediapipe is missing, all methods still work but return neutral metrics.
+    One instance per user, stored in ``st.session_state``. Never shared.
+    """
 
-    def __init__(
-        self,
-        model_selection: int = 0,
-        min_detection_confidence: float = 0.5,
-        center_tolerance: float = 0.15,
-    ) -> None:
-        self._center_tolerance = center_tolerance
-        self._agg = AggregatedFaceMetrics()
+    def __init__(self) -> None:
+        self._samples: List[FaceSample] = []
+        self._total_samples = 0
 
-        # Only create a real detector if both are available.
-        if _HAVE_CV2 and _HAVE_MEDIAPIPE and mp_face_detection is not None:
-            self._detector = mp_face_detection.FaceDetection(
-                model_selection=model_selection,
-                min_detection_confidence=min_detection_confidence,
+    def __len__(self) -> int:
+        return len(self._samples)
+
+    @property
+    def total_samples(self) -> int:
+        """Samples seen across the whole interview, across all snapshots."""
+        return self._total_samples
+
+    def update(self, raw: Any) -> bool:
+        """Ingest one raw sample. Returns True when it was accepted."""
+        sample = normalize_sample(raw)
+        if sample is None:
+            return False
+        self._samples.append(sample)
+        self._total_samples += 1
+        return True
+
+    def ingest_many(self, raws: Any) -> int:
+        """Ingest a batch of samples, returning how many were accepted."""
+        if not isinstance(raws, (list, tuple)):
+            return 0
+        return sum(1 for raw in raws if self.update(raw))
+
+    def summary_dict(self, *, status: VisionStatus = VisionStatus.RUNNING) -> Dict[str, Any]:
+        """Aggregate metrics for the samples collected so far."""
+        count = len(self._samples)
+        if count == 0:
+            return {
+                "vision_enabled": status.is_working,
+                "status": status.value,
+                "samples": 0,
+                "note": "No face-analysis samples were captured for this answer.",
+            }
+
+        with_face = [s for s in self._samples if s.face]
+        face_pct = round(100.0 * len(with_face) / count, 1)
+
+        def pct(predicate) -> float:
+            if not with_face:
+                return 0.0
+            return round(100.0 * sum(1 for s in with_face if predicate(s)) / len(with_face), 1)
+
+        avg_confidence = (
+            round(statistics.fmean(s.score for s in with_face), 3) if with_face else 0.0
+        )
+
+        # Steadiness: how little the face centre wandered. 1.0 = rock steady.
+        if len(with_face) >= 2:
+            spread = statistics.pstdev([s.cx for s in with_face]) + statistics.pstdev(
+                [s.cy for s in with_face]
             )
+            steadiness = round(max(0.0, 1.0 - spread * 4.0), 3)
         else:
-            self._detector = None  # type: ignore[assignment]
+            steadiness = 0.0
 
-    @staticmethod
-    def _compute_centered(
-        image_width: int, image_height: int, bbox
-    ) -> bool:
-        # Determine whether the bounding box is near the image center.
+        return {
+            "vision_enabled": True,
+            "status": status.value,
+            "samples": count,
+            "face_present_pct": face_pct,
+            "centered_pct": pct(lambda s: s.centered),
+            "eye_contact_pct": pct(lambda s: s.eye_contact),
+            "avg_confidence": avg_confidence,
+            "framing_steadiness": steadiness,
+            "note": "Browser-side heuristics from MediaPipe FaceLandmarker; noisy, treat as directional only.",
+        }
 
-        # bbox: mediapipe NormalizedBoundingBox
+    def snapshot_and_reset(
+        self, *, status: VisionStatus = VisionStatus.RUNNING
+    ) -> Dict[str, Any]:
+        """Return this question's aggregate and clear state for the next one.
 
-        cx = bbox.xmin + bbox.width / 2.0
-        cy = bbox.ymin + bbox.height / 2.0
+        This is the method ``app.py`` always expected but which never existed.
+        """
+        snapshot = self.summary_dict(status=status)
+        self._samples.clear()
+        return snapshot
 
-        # normalized center of the image is (0.5, 0.5)
-        dx = abs(cx - 0.5)
-        dy = abs(cy - 0.5)
-
-        return dx <= 0.15 and dy <= 0.15
-
-    def process_frame(self, frame_bgr: np.ndarray) -> FrameFaceMetrics:
-        # Run face detection on a single BGR frame and return per-frame metrics.
-
-        # If vision backends are unavailable, returns neutral metrics.
-
-        if (
-            frame_bgr is None
-            or not _HAVE_CV2
-            or not _HAVE_MEDIAPIPE
-            or self._detector is None
-        ):
-            self._agg.frames_processed += 1
-            return FrameFaceMetrics(num_faces=0)
-
-        # Convert BGR -> RGB as required by MediaPipe
-        frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-
-        results = self._detector.process(frame_rgb)
-
-        if not results.detections:
-            self._agg.frames_processed += 1
-            return FrameFaceMetrics(num_faces=0)
-
-        num_faces = len(results.detections)
-        confidences = [detection.score[0] for detection in results.detections]
-        max_conf = float(max(confidences))
-        mean_conf = float(sum(confidences) / len(confidences))
-
-        # Check if the most confident face is roughly centered
-        best_idx = int(np.argmax(confidences))
-        best_detection = results.detections[best_idx]
-        bbox = best_detection.location_data.relative_bounding_box
-        is_centered = self._compute_centered(
-            frame_bgr.shape[1], frame_bgr.shape[0], bbox
-        )
-
-        # Update aggregates
-        self._agg.frames_processed += 1
-        self._agg.total_faces += num_faces
-        self._agg.accumulated_confidence += sum(confidences)
-
-        return FrameFaceMetrics(
-            num_faces=num_faces,
-            max_confidence=max_conf,
-            mean_confidence=mean_conf,
-            is_centered=is_centered,
-        )
-
-    def update(self, frame_bgr: np.ndarray) -> FrameFaceMetrics:
-        """Alias for process_frame to preserve compatibility."""
-        return self.process_frame(frame_bgr)
-
-    def summary(self) -> AggregatedFaceMetrics:
-        """Return the aggregated metrics dataclass."""
-        return self._agg
-
-    def summary_dict(self) -> Dict:
-        """Return aggregated metrics as a plain dict (for logging/JSON)."""
-        return self._agg.to_dict()
+    def reset(self) -> None:
+        self._samples.clear()
+        self._total_samples = 0
 
 
-# One-shot helper
-_global_vision = VisionAggregator()
-
-
-def analyze_face(
-    frame_bgr: np.ndarray,
-    aggregator: Optional[VisionAggregator] = None,
-) -> Dict:
-    # Convenience function for callers that use analyze_face(frame).
-
-    # Returns a dict with per-frame metrics, plus running aggregate.
-    # If backends are unavailable, returns zeros but does not crash.
-    if aggregator is None:
-        aggregator = _global_vision
-
-    frame_metrics = aggregator.update(frame_bgr)
-    agg_metrics = aggregator.summary()
-
+def disabled_face_stats(status: VisionStatus = VisionStatus.DISABLED) -> Dict[str, Any]:
+    """The face payload for answers recorded without working face analysis."""
     return {
-        "available": _HAVE_CV2 and _HAVE_MEDIAPIPE,
-        "frame": {
-            "num_faces": frame_metrics.num_faces,
-            "max_confidence": frame_metrics.max_confidence,
-            "mean_confidence": frame_metrics.mean_confidence,
-            "is_centered": frame_metrics.is_centered,
-        },
-        "aggregate": agg_metrics.to_dict(),
+        "vision_enabled": False,
+        "status": status.value,
+        "samples": 0,
+        "note": f"Face analysis not active for this answer ({status.label}).",
     }

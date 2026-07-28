@@ -1,0 +1,28 @@
+# Render blueprint. Commit this, then: Render dashboard -> New -> Blueprint.
+# The free plan supports custom domains + automatic SSL, and hard-suspends
+# rather than billing when limits are hit.
+services:
+  - type: web
+    name: intereview-ai
+    runtime: python
+    plan: free
+    region: oregon
+    buildCommand: pip install -r requirements.txt
+    # $PORT is injected by Render. Streamlit must bind 0.0.0.0 to be reachable.
+    startCommand: >-
+      streamlit run app.py
+      --server.port $PORT
+      --server.address 0.0.0.0
+      --server.headless true
+      --server.enableXsrfProtection true
+      --client.showErrorDetails false
+    healthCheckPath: /_stcore/health
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.12.7"
+      # Set the real value in the Render dashboard (Environment -> Secret).
+      # sync: false keeps it out of this file and out of git.
+      - key: GROQ_API_KEY
+        sync: false
+      - key: ALLOW_USER_API_KEY
+        value: "true"
