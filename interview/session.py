@@ -18,6 +18,7 @@ from typing import Any, Dict, List
 
 import streamlit as st
 
+from interview import analytics
 from interview.config import settings
 from interview.vision import VisionAggregator, VisionStatus
 
@@ -26,6 +27,11 @@ STEP_LABELS = ["Setup", "Recording", "Interview", "Results"]
 
 #: Minimum seconds between provider calls from one session.
 MIN_CALL_INTERVAL = 1.5
+
+#: Hard cap on a single answer. Prevents a pasted novel from blowing the free
+#: tier's token limit (which would fail the whole interview) or ballooning
+#: session memory on a 512 MB instance.
+MAX_ANSWER_CHARS = 6000
 
 
 def init_state() -> None:
