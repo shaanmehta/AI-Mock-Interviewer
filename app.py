@@ -13,6 +13,7 @@ Flow: setup -> media choice -> per-question loop with timer -> scored report.
 from __future__ import annotations
 
 import logging
+import math
 import time
 
 import streamlit as st
@@ -315,12 +316,29 @@ def render_media_setup() -> None:
         )
 
     with col_mode:
-        st.markdown("**How your answer is captured**")
-        st.caption(
-            "Record your answer and it is transcribed for you. This works in every "
-            "browser. You can also type your answer instead - typed answers are "
-            "scored exactly the same."
+        # Chosen here and fixed for the whole interview: swapping the
+        # interviewer's voice mid-run is distracting, so the picker is not shown
+        # again once the interview starts.
+        voice_choice = st.radio(
+            "Interviewer voice",
+            options=["female", "male"],
+            index=0 if ss.voice_gender == "female" else 1,
+            format_func=lambda value: {
+                "female": "Female voice",
+                "male": "Male voice",
+            }[value],
+            horizontal=True,
         )
+        ss.voice_gender = voice_choice
+        st.caption("This is fixed once the interview begins.")
+
+    st.divider()
+    st.markdown("**How your answer is captured**")
+    st.caption(
+        "Record your answer and it is transcribed for you. This works in every "
+        "browser. You can also type your answer instead - typed answers are "
+        "scored exactly the same."
+    )
 
     st.divider()
     col_back, col_go = st.columns([1, 2])
@@ -396,29 +414,77 @@ def render_camera_panel() -> None:
         )
 
 
+#: Breathing room after the clock hits zero. Stopping a recording on the buzzer
+#: still needs a round trip to transcribe it, and cutting the question off at
+#: exactly 0:00 threw that answer away.
+GRACE_SECONDS = 5
+
+
 @st.fragment(run_every=1)
 def render_timer() -> None:
-    """One-second countdown that reruns only itself."""
+    """One-second countdown, followed by a short grace period."""
     ss = st.session_state
     if ss.timer_start is None or ss.timer_expired:
         return
 
-    remaining = max(0.0, float(ss.timer_seconds) - (time.time() - float(ss.timer_start)))
-    fraction = remaining / float(ss.timer_seconds) if ss.timer_seconds else 0.0
+    elapsed = time.time() - float(ss.timer_start)
+    limit = float(ss.timer_seconds)
+    remaining = max(0.0, limit - elapsed)
 
-    minutes, seconds = divmod(int(remaining), 60)
-    st.progress(
-        max(0.0, min(1.0, fraction)),
-        text=f"{minutes}:{seconds:02d} left on this answer",
-    )
+    if remaining > 0:
+        minutes, seconds = divmod(int(remaining), 60)
+        st.progress(
+            max(0.0, min(1.0, remaining / limit if limit else 0.0)),
+            text=f"{minutes}:{seconds:02d} left on this answer",
+        )
+        return
 
-    if remaining <= 0:
-        ss.timer_expired = True
-        st.rerun(scope="app")
+    # Grace window: keep accepting a transcription that is still landing.
+    grace_left = max(0.0, (limit + GRACE_SECONDS) - elapsed)
+    st.progress(0.0, text=f"Time is up - saving your answer ({math.ceil(grace_left)}s)")
+
+    # Never cut off an upload that is still in flight.
+    if ss.get("transcribing"):
+        return
+    if grace_left > 0:
+        return
+
+    ss.timer_expired = True
+    st.rerun(scope="app")
+
+
+def _answer_key(q_idx: int) -> str:
+    """Canonical store for an answer.
+
+    Deliberately NOT a widget key. Streamlit garbage-collects widget-backed
+    session keys whose widget did not render in the last completed run, and a
+    run can be discarded part-way when the timer fragment requests an app-level
+    rerun. Binding the answer straight to the text area therefore lost answers
+    whenever a transcription landed close to the buzzer.
+    """
+    return f"answer_{q_idx}"
+
+
+def _answer_widget_key(q_idx: int) -> str:
+    """Widget key for the text area, versioned so appends refresh the box."""
+    rev = int(st.session_state.get(f"answer_rev_{q_idx}", 0))
+    return f"answer_box_{q_idx}_{rev}"
+
+
+def _append_answer(q_idx: int, text: str) -> None:
+    """Add transcribed text to the canonical answer and refresh the text area."""
+    if not text:
+        return
+    ss = st.session_state
+    key = _answer_key(q_idx)
+    existing = (ss.get(key) or "").strip()
+    ss[key] = f"{existing} {text.strip()}".strip()[:MAX_ANSWER_CHARS]
+    # Bump the revision so the text area is rebuilt showing the new value.
+    ss[f"answer_rev_{q_idx}"] = int(ss.get(f"answer_rev_{q_idx}", 0)) + 1
 
 
 def _current_answer_key() -> str:
-    return f"answer_text_{st.session_state.question_idx}"
+    return _answer_key(int(st.session_state.question_idx))
 
 
 def submit_current_answer(*, auto: bool = False) -> None:
@@ -476,7 +542,7 @@ def _render_mic(q_idx: int) -> None:
     therefore meaningless scores.
     """
     ss = st.session_state
-    answer_key = _current_answer_key()
+    answer_key = _answer_key(q_idx)
     ss.setdefault(answer_key, "")
 
     nonce = int(ss.stt_nonce.get(q_idx, 0))
@@ -492,29 +558,38 @@ def _render_mic(q_idx: int) -> None:
         key=f"rec_q{q_idx}_{nonce}",
     )
     if recording and recording.get("bytes"):
-        with st.spinner("Transcribing your answer…"):
-            try:
-                throttle()
-                text = transcribe_audio(recording["bytes"], **credentials())
-                if text:
-                    existing = (ss[answer_key] or "").strip()
-                    ss[answer_key] = f"{existing} {text}".strip()
-                else:
-                    st.warning(
-                        "That recording was too short to transcribe. Try again, or "
-                        "type your answer below.",
-                    )
-            except Exception as exc:  # noqa: BLE001
-                st.warning(_friendly_error(exc))
+        # Hold off the auto-submit while the upload is in flight, so the clock
+        # can never discard a transcription that is still being fetched.
+        ss.transcribing = True
+        try:
+            with st.spinner("Transcribing your answer…"):
+                try:
+                    throttle()
+                    text = transcribe_audio(recording["bytes"], **credentials())
+                    if text:
+                        _append_answer(q_idx, text)
+                    else:
+                        st.warning(
+                            "That recording was too short to transcribe. Try again, "
+                            "or type your answer below.",
+                        )
+                except Exception as exc:  # noqa: BLE001
+                    st.warning(_friendly_error(exc))
+        finally:
+            ss.transcribing = False
 
-    st.text_area(
+    widget_key = _answer_widget_key(q_idx)
+    typed = st.text_area(
         "Your answer",
-        key=answer_key,
+        value=ss.get(answer_key, ""),
+        key=widget_key,
         height=180,
         max_chars=MAX_ANSWER_CHARS,
         placeholder="Record above, or just type your answer here — both are scored the same.",
         label_visibility="collapsed",
     )
+    # Mirror typing back into the canonical store, which is what gets submitted.
+    ss[answer_key] = typed or ""
 
     captured = (ss.get(answer_key) or "").strip()
     if captured:
@@ -561,7 +636,11 @@ def render_question() -> None:
         ss.timer_expired = False
 
     theme.question_card(ss.current_question)
-    components.speak(ss.current_question, autoplay=bool(ss.audio_enabled))
+    components.speak(
+        ss.current_question,
+        voice=ss.get("voice_gender", "female"),
+        autoplay=bool(ss.audio_enabled),
+    )
     render_timer()
 
     st.divider()

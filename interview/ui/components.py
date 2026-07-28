@@ -36,7 +36,9 @@ def _tts_template() -> str:
     return (_FRONTEND / "tts" / "index.html").read_text(encoding="utf-8")
 
 
-def speak(text: str, *, autoplay: bool = False, height: int = 64) -> None:
+def speak(
+    text: str, *, voice: str = "female", autoplay: bool = False, height: int = 64
+) -> None:
     """Render the browser TTS bar for ``text``.
 
     Costs nothing and scales to unlimited concurrent users: the audio is
@@ -45,7 +47,13 @@ def speak(text: str, *, autoplay: bool = False, height: int = 64) -> None:
     enhancement, and the component degrades to an honest notice when the
     browser has no speech synthesis.
     """
-    config = json.dumps({"text": text or "", "autoplay": bool(autoplay)})
+    config = json.dumps(
+        {
+            "text": text or "",
+            "voice": voice if voice in ("female", "male") else "female",
+            "autoplay": bool(autoplay),
+        }
+    )
     # The question text is LLM output, so it is untrusted. It is injected only
     # inside a <script type="application/json"> block — never as markup or as
     # executable JS. json.dumps escapes quotes and backslashes; escaping "</"

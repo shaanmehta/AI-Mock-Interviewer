@@ -52,6 +52,8 @@ def init_state() -> None:
     ss.setdefault("stt_nonce", {})
     ss.setdefault("stt_mode", "record_transcribe")  # only capture path
     ss.setdefault("audio_enabled", True)
+    ss.setdefault("voice_gender", "female")
+    ss.setdefault("transcribing", False)
 
     # Vision — per user, never shared
     ss.setdefault("vision", VisionAggregator())
@@ -181,8 +183,14 @@ def start_new_interview(profile: Dict[str, Any]) -> None:
     ss.timer_question_idx = None
     ss.timer_expired = False
 
+    ss.transcribing = False
+
     # Clear per-question answer buffers from any previous run.
-    for key in [k for k in list(ss.keys()) if str(k).startswith("answer_text_")]:
+    stale = [
+        k for k in list(ss.keys())
+        if str(k).startswith(("answer_", "answer_rev_", "answer_box_"))
+    ]
+    for key in stale:
         del ss[key]
 
 

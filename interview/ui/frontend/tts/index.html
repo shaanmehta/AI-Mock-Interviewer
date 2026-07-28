@@ -67,17 +67,14 @@
   var supported = typeof synth !== "undefined" && typeof window.SpeechSynthesisUtterance !== "undefined";
   var root = document.getElementById("root");
 
-  var STORE_VOICE = "intereview.tts.voice";
-
-  // The only two voices offered. Both ship with macOS/iOS; on other platforms
-  // neither exists, so we fall back to the system default rather than leaving
-  // the user with no voice at all.
-  var ALLOWED = ["Samantha", "Aaron"];
-
-  function store(key, value) { try { localStorage.setItem(key, value); } catch (e) {} }
-  function load(key, fallback) {
-    try { var v = localStorage.getItem(key); return v === null ? fallback : v; } catch (e) { return fallback; }
-  }
+  // Voice is chosen before the interview starts and cannot change mid-run, so
+  // the component receives a gender and resolves it to whatever the platform
+  // actually provides. Named voices differ wildly across OSes, hence the
+  // ordered preference lists with a generic fallback.
+  var PREFERRED = {
+    female: ["Samantha", "Victoria", "Zira", "Karen", "Moira", "Tessa", "Fiona", "Female"],
+    male:   ["Aaron", "Daniel", "Alex", "David", "Fred", "Rishi", "Male"]
+  };
 
   if (!supported) {
     root.innerHTML =
@@ -91,72 +88,41 @@
     '<div class="bar">' +
       '<button id="play" class="primary">Play question</button>' +
       '<button id="stop">Stop</button>' +
-      '<span class="spacer"></span>' +
-      '<select id="voice" title="Voice"></select>' +
     '</div>';
 
   var playBtn = document.getElementById("play");
   var stopBtn = document.getElementById("stop");
-  var voiceSel = document.getElementById("voice");
 
-  var voices = [];
+  var chosen = null;
 
-  function pickAllowed(all) {
-    var out = [];
-    ALLOWED.forEach(function (wanted) {
-      var match = all.filter(function (v) {
-        return v.name.indexOf(wanted) !== -1 && /^en[-_]?US/i.test(v.lang);
-      })[0];
-      if (match) out.push(match);
-    });
-    return out;
-  }
-
-  function populateVoices() {
+  function resolveVoice() {
     var all = synth.getVoices() || [];
     if (!all.length) return false;
 
-    voices = pickAllowed(all);
-    voiceSel.innerHTML = "";
+    var english = all.filter(function (v) { return /^en/i.test(v.lang); });
+    var pool = english.length ? english : all;
+    var wanted = PREFERRED[CFG.voice] || PREFERRED.female;
 
-    if (!voices.length) {
-      // Neither allowed voice exists on this platform. Use the browser default
-      // and say so, rather than silently offering a voice we didn't sanction.
-      voiceSel.style.display = "none";
-      if (!document.getElementById("voicenote")) {
-        var note = document.createElement("span");
-        note.id = "voicenote";
-        note.className = "muted";
-        note.textContent = "Default system voice";
-        voiceSel.parentNode.appendChild(note);
-      }
-      return true;
+    for (var i = 0; i < wanted.length; i++) {
+      var match = pool.filter(function (v) {
+        return v.name.toLowerCase().indexOf(wanted[i].toLowerCase()) !== -1;
+      })[0];
+      if (match) { chosen = match; return true; }
     }
 
-    voiceSel.style.display = "";
-    var saved = load(STORE_VOICE, "");
-    voices.forEach(function (v, i) {
-      var opt = document.createElement("option");
-      opt.value = String(i);
-      opt.textContent = v.name + " (" + v.lang + ")";
-      if (v.voiceURI === saved || v.name === saved) opt.selected = true;
-      voiceSel.appendChild(opt);
-    });
+    // No recognisable match on this platform: use the browser default rather
+    // than leaving the visitor with no voice at all.
+    chosen = pool[0] || null;
     return true;
   }
 
   // Voice list loads asynchronously in Chrome; retry until it arrives.
-  if (!populateVoices()) {
-    synth.onvoiceschanged = function () { populateVoices(); };
+  if (!resolveVoice()) {
+    synth.onvoiceschanged = function () { resolveVoice(); };
     var tries = 0;
     var poll = setInterval(function () {
-      if (populateVoices() || ++tries > 20) clearInterval(poll);
+      if (resolveVoice() || ++tries > 20) clearInterval(poll);
     }, 150);
-  }
-
-  function currentVoice() {
-    var idx = parseInt(voiceSel.value, 10);
-    return (!isNaN(idx) && voices[idx]) ? voices[idx] : null;
   }
 
   function speak() {
@@ -164,7 +130,7 @@
     try { synth.cancel(); } catch (e) {}
 
     var utter = new SpeechSynthesisUtterance(CFG.text);
-    var voice = currentVoice();
+    var voice = chosen;
     if (voice) { utter.voice = voice; utter.lang = voice.lang; }
     utter.rate = 1;
     utter.pitch = 1;
@@ -180,11 +146,6 @@
     try { synth.cancel(); } catch (e) {}
     playBtn.disabled = false;
   });
-  voiceSel.addEventListener("change", function () {
-    var v = currentVoice();
-    if (v) store(STORE_VOICE, v.voiceURI || v.name);
-  });
-
   // Autoplay is a best-effort enhancement. Browsers increasingly require a
   // user gesture first; when it's blocked the Play button is still right there,
   // and the question text is always on screen regardless.
