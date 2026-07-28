@@ -36,6 +36,22 @@ def _tts_template() -> str:
     return (_FRONTEND / "tts" / "index.html").read_text(encoding="utf-8")
 
 
+@lru_cache(maxsize=1)
+def _stt_check_template() -> str:
+    return (_FRONTEND / "stt_check" / "index.html").read_text(encoding="utf-8")
+
+
+def speech_support_notice(height: int = 92) -> None:
+    """Warn, in-browser, when live transcription is unavailable.
+
+    Feature-detects the Web Speech API rather than sniffing the User-Agent, and
+    renders nothing at all when it is supported. This is the failure that
+    silently produced empty transcripts (and therefore a meaningless score) for
+    Safari and Firefox visitors.
+    """
+    st.iframe(_stt_check_template(), height=height)
+
+
 def speak(text: str, *, autoplay: bool = False, height: int = 64) -> None:
     """Render the browser TTS bar for ``text``.
 

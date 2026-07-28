@@ -127,7 +127,7 @@ def render(
         )
 
     # ---- Rubric ---------------------------------------------------------
-    theme.section("Rubric breakdown", "📊")
+    theme.section("Rubric breakdown")
     # "Ranked" leads: it is the more actionable view and, unlike the radar, it
     # stays readable all the way down to a phone viewport.
     bars_tab, radar_tab = st.tabs(["Ranked", "Radar"])
@@ -145,14 +145,14 @@ def render(
     if strengths or improvements:
         left, right = st.columns(2, gap="large")
         with left:
-            theme.section("What worked", "✅")
+            theme.section("What worked")
             if strengths:
                 for item in strengths:
                     st.markdown(f"- {item}")
             else:
                 st.caption("No specific strengths were identified.")
         with right:
-            theme.section("What to fix", "🎯")
+            theme.section("What to fix")
             if improvements:
                 for item in improvements:
                     st.markdown(f"- {item}")
@@ -162,7 +162,7 @@ def render(
     # ---- Per-question ----------------------------------------------------
     notes = result.get("question_notes") or []
     if notes:
-        theme.section("Question by question", "💬")
+        theme.section("Question by question")
         for index, note in enumerate(notes):
             question = (note.get("question") or "").strip() or f"Question {index + 1}"
             preview = question if len(question) <= 74 else question[:74].rsplit(" ", 1)[0] + "…"
@@ -206,7 +206,7 @@ def render(
     # ---- Delivery notes ---------------------------------------------------
     stats = result.get("advanced_stats") or {}
     if any(stats.values()):
-        theme.section("Delivery notes", "🎙️")
+        theme.section("Delivery notes")
         st.caption(
             "These come from noisy browser-side heuristics and are deliberately "
             "weighted lightly in your score."
@@ -216,15 +216,15 @@ def render(
                 st.markdown(f"**{label}** — {stats[key]}")
 
     # ---- Download ----------------------------------------------------------
-    theme.section("Take it with you", "📥")
+    theme.section("Take it with you")
     printable = build_printable_html(result, profile, qa_history)
     slug = (profile.get("job_field") or "interview").lower().replace(" ", "-")[:40]
 
     st.download_button(
-        "⬇︎  Printable report (PDF)",
+        "Printable report (PDF)",
         data=printable,
         file_name=f"intereview-{slug}.html",
         mime="text/html",
         use_container_width=True,
     )
-    st.caption("Open the downloaded file and use your browser's Print → Save as PDF.")
+    st.caption("Open the downloaded file and use your browser's Print to PDF option.")

@@ -25,7 +25,6 @@ def _check_password() -> bool:
         st.error(
             "Analytics are disabled: no `ANALYTICS_PASSWORD` is configured for "
             "this deployment.",
-            icon="🔒",
         )
         st.caption(
             "Set ANALYTICS_PASSWORD in your host's environment to enable this page."
@@ -44,7 +43,7 @@ def _check_password() -> bool:
                 st.session_state.admin_authed = True
                 st.rerun()
             else:
-                st.error("Incorrect password.", icon="🚫")
+                st.error("Incorrect password.")
     return False
 
 
@@ -64,7 +63,7 @@ def render() -> None:
 
     col_refresh, col_backend = st.columns([1, 2])
     with col_refresh:
-        if st.button("↻  Refresh", use_container_width=True):
+        if st.button("Refresh", use_container_width=True):
             st.rerun()
     with col_backend:
         backend = analytics.backend_name()
@@ -82,12 +81,11 @@ def render() -> None:
         st.info(
             "No events recorded yet. Open the site in another browser to "
             "generate some.",
-            icon="📭",
         )
         return
 
     # ---- Funnel -----------------------------------------------------------
-    theme.section("Funnel", "📈")
+    theme.section("Funnel")
     col_a, col_b, col_c = st.columns(3)
     col_a.metric("Opened the site", stats["opened"])
     col_b.metric(
@@ -112,7 +110,7 @@ def render() -> None:
     col_f.metric("Errors surfaced", stats["errors"])
 
     # ---- Breakdowns -------------------------------------------------------
-    theme.section("What people are practising", "🧭")
+    theme.section("What people are practising")
     _bar_counts("Job fields", stats["by_field"])
 
     col_media, col_stt = st.columns(2)
@@ -124,7 +122,7 @@ def render() -> None:
         _bar_counts("Speech-to-text modes", stats["by_stt"])
 
     if stats["scores"]:
-        theme.section("Score distribution", "🎯")
+        theme.section("Score distribution")
         buckets: Dict[str, int] = {}
         for score in stats["scores"]:
             low = int(score // 10) * 10
@@ -132,7 +130,7 @@ def render() -> None:
         st.bar_chart(dict(sorted(buckets.items())), height=220)
 
     # ---- Raw events -------------------------------------------------------
-    theme.section("Recent events", "🧾")
+    theme.section("Recent events")
     recent = list(reversed(rows))[:200]
     st.dataframe(
         [
@@ -150,7 +148,7 @@ def render() -> None:
     )
 
     st.download_button(
-        "⬇︎  Export all events (JSON)",
+        "Export all events (JSON)",
         data=json.dumps(rows, indent=2),
         file_name="intereview-analytics.json",
         mime="application/json",

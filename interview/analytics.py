@@ -43,6 +43,7 @@ INTERVIEW_STARTED = "interview_started"
 INTERVIEW_COMPLETED = "interview_completed"
 QUESTION_ANSWERED = "question_answered"
 SCORING_FAILED = "scoring_failed"
+INTERVIEW_NO_ANSWERS = "interview_no_answers"
 PROVIDER_ERROR = "provider_error"
 
 #: Cap so a hostile client cannot bloat storage through the props blob.

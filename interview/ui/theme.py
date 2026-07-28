@@ -208,10 +208,9 @@ def title(text: str, subtitle: Optional[str] = None) -> None:
         st.markdown(f'<p class="iv-sub">{_esc(subtitle)}</p>', unsafe_allow_html=True)
 
 
-def section(text: str, icon: str = "") -> None:
-    icon_html = f"<span>{_esc(icon)}</span>" if icon else ""
+def section(text: str) -> None:
     st.markdown(
-        f'<div class="iv-section">{icon_html}<span>{_esc(text)}</span></div>',
+        f'<div class="iv-section"><span>{_esc(text)}</span></div>',
         unsafe_allow_html=True,
     )
 

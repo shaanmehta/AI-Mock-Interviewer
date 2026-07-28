@@ -14,7 +14,7 @@ the site unusable for everyone else.
 from __future__ import annotations
 
 import time
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import streamlit as st
 
@@ -191,6 +191,12 @@ def reset_to_setup() -> None:
     start_new_interview({})
 
 
+#: Recorded when the clock runs out with nothing captured. Flagged explicitly
+#: rather than stored as an ordinary answer: a transcript full of these means
+#: capture failed, not that the candidate performed badly.
+NO_ANSWER_PLACEHOLDER = "(No answer was given before time ran out.)"
+
+
 def record_answer(
     question: str, answer: str, face_stats: Dict[str, Any]
 ) -> None:
@@ -201,6 +207,7 @@ def record_answer(
         {
             "q": (question or "")[:1000],
             "a": answer,
+            "answered": answer.strip() != NO_ANSWER_PLACEHOLDER and bool(answer.strip()),
             "voice": {
                 "stt_engine": st.session_state.get("stt_mode", "browser"),
                 "words": words,
@@ -213,3 +220,21 @@ def record_answer(
 
 def transcript() -> List[Dict[str, Any]]:
     return list(st.session_state.get("qa", []))
+
+
+def answered_count(qa_history: Optional[List[Dict[str, Any]]] = None) -> int:
+    """How many questions actually captured a real answer."""
+    rows = qa_history if qa_history is not None else st.session_state.get("qa", [])
+    total = 0
+    for item in rows:
+        if not isinstance(item, dict):
+            continue
+        if item.get("answered") is not None:
+            if item["answered"]:
+                total += 1
+            continue
+        # Tolerate transcripts recorded before "answered" existed.
+        text = str(item.get("a", "")).strip()
+        if text and text != NO_ANSWER_PLACEHOLDER:
+            total += 1
+    return total

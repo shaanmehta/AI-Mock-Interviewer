@@ -23,7 +23,9 @@ from interview.questions import generate_next_question
 from interview.scoring import score_full_interview
 from interview.session import (
     MAX_ANSWER_CHARS,
+    NO_ANSWER_PLACEHOLDER,
     STEP_LABELS,
+    answered_count,
     can_regenerate,
     can_start_interview,
     credentials,
@@ -120,13 +122,13 @@ def render_sidebar() -> None:
     ss = st.session_state
 
     with st.sidebar:
-        st.markdown("### ⚙️ Settings")
+        st.markdown("### Settings")
 
         ss.audio_enabled = st.toggle("Read questions aloud", value=ss.audio_enabled)
 
         if settings.allow_user_api_key:
             st.divider()
-            st.markdown("#### 🔑 Use your own API key")
+            st.markdown("#### Use your own API key")
             st.caption(
                 "Optional. This site shares one free rate limit across everyone using "
                 "it. Your own free key skips that queue entirely. It's kept in memory "
@@ -157,14 +159,13 @@ def render_sidebar() -> None:
             st.caption(f"Get a free key: {link}")
 
             if using_own_key():
-                st.success("Using your key — no shared rate limit.", icon="✅")
+                st.success("Using your key — no shared rate limit.")
 
         st.divider()
         if not settings.has_shared_key and not using_own_key():
             st.warning(
                 "This deployment has no shared API key configured, so you'll need to "
                 "add your own above to run an interview.",
-                icon="⚠️",
             )
 
         # A custom endpoint is a legitimate feature (local Ollama, a proxy), but
@@ -175,7 +176,6 @@ def render_sidebar() -> None:
             st.warning(
                 f"Using a custom AI endpoint (`{custom_endpoint}`) instead of Groq. "
                 "Responses come from that server, not from the real model.",
-                icon="🧪",
             )
         st.caption(
             "Note: InteReviewAI gives practice feedback from an LLM. "
@@ -203,14 +203,13 @@ def render_setup() -> None:
         st.error(
             "This site can't run an interview right now — no AI provider is "
             "configured.",
-            icon="🔌",
         )
         st.markdown(
             "**You can start immediately with your own free key:**\n\n"
             "1. Open [console.groq.com/keys](https://console.groq.com/keys) and "
             "sign in with GitHub or Google.\n"
             "2. Create a key (it starts with `gsk_`). No credit card is needed.\n"
-            "3. Paste it into **Settings » → Use your own API key** at the top left."
+            "3. Paste it into **Settings -> Use your own API key** at the top left."
         )
         st.caption(
             "Your key stays in this browser session only — it is never stored or logged."
@@ -251,7 +250,7 @@ def render_setup() -> None:
             n_questions = st.slider("Number of questions", 3, settings.max_questions, 5)
 
         submitted = st.form_submit_button(
-            "Continue  →", use_container_width=True, type="primary"
+            "Continue", use_container_width=True, type="primary"
         )
 
     if submitted:
@@ -259,7 +258,6 @@ def render_setup() -> None:
             st.error(
                 "You've started a lot of interviews in this session. "
                 "Refresh the page to continue.",
-                icon="🛑",
             )
             return
 
@@ -305,8 +303,8 @@ def render_media_setup() -> None:
         "Recording mode",
         options=["mic", "mic+cam"],
         format_func=lambda value: {
-            "mic": "🎙️  Microphone only",
-            "mic+cam": "🎥  Microphone + camera",
+            "mic": "Microphone only",
+            "mic+cam": "Microphone + camera",
         }[value],
         index=0 if ss.media_mode == "mic" else 1,
         horizontal=True,
@@ -318,7 +316,6 @@ def render_media_setup() -> None:
             "Face analysis runs entirely in your browser — video frames never leave "
             "your device, and nothing is recorded or uploaded. Only a small summary "
             "(how often you were centered and facing the camera) is used.",
-            icon="🔒",
         )
     else:
         st.caption(
@@ -361,17 +358,16 @@ def render_media_setup() -> None:
             st.warning(
                 "Your browser may not support live transcription. If the transcript "
                 "stays empty, switch to “Record, then transcribe”.",
-                icon="⚠️",
             )
 
     st.divider()
     col_back, col_go = st.columns([1, 2])
     with col_back:
-        if st.button("←  Back", use_container_width=True):
+        if st.button("Back", use_container_width=True):
             st.session_state.stage = "setup"
             st.rerun()
     with col_go:
-        if st.button("Start interview  →", type="primary", use_container_width=True):
+        if st.button("Start interview", type="primary", use_container_width=True):
             ss.timer_start = None
             ss.timer_question_idx = None
             ss.timer_expired = False
@@ -450,7 +446,7 @@ def render_timer() -> None:
     minutes, seconds = divmod(int(remaining), 60)
     st.progress(
         max(0.0, min(1.0, fraction)),
-        text=f"⏱️  {minutes}:{seconds:02d} left on this answer",
+        text=f"{minutes}:{seconds:02d} left on this answer",
     )
 
     if remaining <= 0:
@@ -471,10 +467,9 @@ def submit_current_answer(*, auto: bool = False) -> None:
         if not auto:
             st.error(
                 "No answer captured yet. Record your response, or type it into the box.",
-                icon="🎙️",
             )
             return
-        answer = "(No answer was given before time ran out.)"
+        answer = NO_ANSWER_PLACEHOLDER
 
     # Face stats for this question, then clear for the next one. This is the
     # snapshot_and_reset() that app.py always called but never existed.
@@ -518,10 +513,13 @@ def _render_mic(q_idx: int) -> None:
     if ss.stt_mode == "browser":
         from streamlit_mic_recorder import speech_to_text
 
+        # Renders only when the browser lacks the Web Speech API.
+        components.speech_support_notice()
+
         transcript = speech_to_text(
             language="en",
-            start_prompt="🎙️  Start talking",
-            stop_prompt="⏹️  Stop and transcribe",
+            start_prompt="Start talking",
+            stop_prompt="Stop and transcribe",
             just_once=True,
             use_container_width=True,
             key=f"stt_q{q_idx}_{nonce}",
@@ -533,8 +531,8 @@ def _render_mic(q_idx: int) -> None:
         from streamlit_mic_recorder import mic_recorder
 
         recording = mic_recorder(
-            start_prompt="🎙️  Start recording",
-            stop_prompt="⏹️  Stop and transcribe",
+            start_prompt="Start recording",
+            stop_prompt="Stop and transcribe",
             just_once=True,
             use_container_width=True,
             format="webm",
@@ -552,10 +550,9 @@ def _render_mic(q_idx: int) -> None:
                         st.warning(
                             "That recording was too short to transcribe. Try again, or "
                             "type your answer below.",
-                            icon="🎙️",
                         )
                 except Exception as exc:  # noqa: BLE001
-                    st.warning(_friendly_error(exc), icon="⚠️")
+                    st.warning(_friendly_error(exc))
 
     st.text_area(
         "Your answer",
@@ -593,10 +590,10 @@ def render_question() -> None:
     )
 
     if not _ensure_question():
-        st.error(ss.question_error, icon="⏳")
+        st.error(ss.question_error)
         col_retry, col_leave = st.columns(2)
         with col_retry:
-            if st.button("↻  Try again", type="primary", use_container_width=True):
+            if st.button("Try again", type="primary", use_container_width=True):
                 st.rerun()
         with col_leave:
             if st.button("End interview", use_container_width=True):
@@ -619,20 +616,20 @@ def render_question() -> None:
     if ss.media_mode == "mic+cam":
         col_answer, col_cam = st.columns([1.35, 1], gap="large")
         with col_answer:
-            theme.section("Your answer", "🎙️")
+            theme.section("Your answer")
             _render_mic(q_idx)
         with col_cam:
-            theme.section("Camera", "📷")
+            theme.section("Camera")
             render_camera_panel()
     else:
-        theme.section("Your answer", "🎙️")
+        theme.section("Your answer")
         _render_mic(q_idx)
 
     st.divider()
 
     is_last = q_idx + 1 >= n_questions
     if st.button(
-        "Finish and get my report  →" if is_last else "Submit answer  →",
+        "Finish and get my report" if is_last else "Submit answer",
         type="primary",
         use_container_width=True,
     ):
@@ -660,6 +657,31 @@ def render_finished() -> None:
         f"{ss.profile.get('experience_level', '')}",
     )
 
+    # If nothing was captured, scoring an empty transcript produces a very low
+    # score that looks like a verdict on the candidate but is really a capture
+    # failure. Say what actually happened instead, and don't spend quota on it.
+    if answered_count(ss.qa) == 0 and ss.qa:
+        st.error(
+            "We couldn't hear any of your answers, so there's nothing to score.",
+        )
+        st.markdown(
+            "This almost always means the microphone wasn't captured. Common causes:\n\n"
+            "- **Microphone permission was blocked.** Check the address bar for a "
+            "blocked-microphone icon and allow access.\n"
+            "- **Live transcription isn't supported in this browser.** It works in "
+            "Chrome and Edge, but not Safari or Firefox. On the recording screen, "
+            "choose **Record, then transcribe** instead, which works everywhere.\n"
+            "- **You can always type your answers** into the answer box; typed "
+            "answers are scored exactly the same."
+        )
+        track(analytics.INTERVIEW_NO_ANSWERS, n_questions=len(ss.qa),
+              stt_mode=ss.stt_mode, media_mode=ss.media_mode)
+        st.divider()
+        if st.button("Try again", type="primary", use_container_width=True):
+            reset_to_setup()
+            st.rerun()
+        return
+
     if ss.final_result is None and ss.scoring_error is None:
         with st.spinner("The hiring panel is reviewing your answers…"):
             try:
@@ -681,10 +703,10 @@ def render_finished() -> None:
                 track(analytics.SCORING_FAILED, kind=type(exc).__name__)
 
     if ss.scoring_error:
-        st.error(ss.scoring_error, icon="⏳")
+        st.error(ss.scoring_error)
         col_retry, col_restart = st.columns(2)
         with col_retry:
-            if st.button("↻  Retry scoring", type="primary", use_container_width=True):
+            if st.button("Retry scoring", type="primary", use_container_width=True):
                 ss.scoring_error = None
                 st.rerun()
         with col_restart:
@@ -702,7 +724,7 @@ def render_finished() -> None:
         results.render(ss.final_result, ss.profile, ss.qa)
 
     st.divider()
-    if st.button("↩︎  Start a new interview", use_container_width=True):
+    if st.button("Start a new interview", use_container_width=True):
         reset_to_setup()
         st.rerun()
 
@@ -754,8 +776,7 @@ except Exception as exc:  # noqa: BLE001
     track(analytics.PROVIDER_ERROR, stage="unhandled", kind=type(exc).__name__)
     st.error(
         "Something went wrong on our side. Your progress is safe — please try again.",
-        icon="⚠️",
     )
-    if st.button("↻  Reload the app", type="primary"):
+    if st.button("Reload the app", type="primary"):
         reset_to_setup()
         st.rerun()
