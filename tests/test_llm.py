@@ -166,3 +166,35 @@ def test_transcribe_tolerates_json_body():
     with patch("requests.post", return_value=_Response(text='{"text": "hi there"}')):
         out = GroqOK().transcribe(audio_bytes=b"x" * 5000, filename="a.webm", model="w")
     assert out == "hi there"
+
+
+# ---- Configuration guards -------------------------------------------------
+# A stub or misconfigured endpoint once served canned questions and a fixed
+# score that were indistinguishable from real model output. These guards make
+# both situations visible instead of silent.
+
+
+@pytest.mark.parametrize(
+    "placeholder",
+    ["PASTE_YOUR_REAL_GROQ_KEY_HERE", "gsk_replace_me", "changeme", "  gsk_replace_me  "],
+)
+def test_placeholder_keys_count_as_no_key(placeholder):
+    with patch("interview.llm.get_secret", return_value=placeholder):
+        assert llm.shared_api_key_for("groq") is None
+
+
+def test_real_key_is_returned():
+    with patch("interview.llm.get_secret", return_value="gsk_a_real_looking_key"):
+        assert llm.shared_api_key_for("groq") == "gsk_a_real_looking_key"
+
+
+def test_custom_base_url_reported_when_overridden():
+    with patch("interview.llm.get_secret", return_value="http://127.0.0.1:8931/openai/v1"):
+        assert llm.custom_base_url() == "http://127.0.0.1:8931/openai/v1"
+
+
+def test_custom_base_url_none_for_default_endpoint():
+    with patch("interview.llm.get_secret", return_value=llm.GroqProvider.DEFAULT_BASE_URL):
+        assert llm.custom_base_url() is None
+    with patch("interview.llm.get_secret", return_value=None):
+        assert llm.custom_base_url() is None

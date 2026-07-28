@@ -39,8 +39,8 @@ from interview.ui import components, results, theme
 from interview.vision import VisionStatus, disabled_face_stats
 
 st.set_page_config(
-    page_title="InteReviewAI — Mock Interview Practice",
-    page_icon="🎤",
+    page_title="InteReviewAI",
+    page_icon=theme.BLANK_ICON,  # blank tab icon: title only, no emoji
     layout="centered",
     initial_sidebar_state="collapsed",
 )
@@ -161,6 +161,17 @@ def render_sidebar() -> None:
                 "add your own above to run an interview.",
                 icon="⚠️",
             )
+
+        # A custom endpoint is a legitimate feature (local Ollama, a proxy), but
+        # it must never be silent: a stub server returns canned questions and a
+        # fixed score that are otherwise indistinguishable from real output.
+        custom_endpoint = llm.custom_base_url()
+        if custom_endpoint:
+            st.warning(
+                f"Using a custom AI endpoint (`{custom_endpoint}`) instead of Groq. "
+                "Responses come from that server, not from the real model.",
+                icon="🧪",
+            )
         st.caption(
             "Note: InteReviewAI gives practice feedback from an LLM. "
             "It is not a hiring decision."
@@ -216,7 +227,6 @@ def render_setup() -> None:
         submitted = st.form_submit_button(
             "Continue  →", use_container_width=True, type="primary"
         )
-        theme.button_hint("Or press Enter to submit form")
 
     if submitted:
         if not can_start_interview():

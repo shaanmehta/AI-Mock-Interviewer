@@ -141,12 +141,6 @@ _CSS = """
   border: none; box-shadow: 0 2px 14px -4px rgba(79,124,255,.65);
 }
 
-/* Hint line under a primary action. */
-.iv-btnhint {
-  text-align: center; font-size: .79rem; opacity: .5;
-  margin: .5rem 0 0; letter-spacing: .01em;
-}
-
 /* ---- Inputs ---- */
 .stTextInput input, .stTextArea textarea, .stSelectbox div[data-baseweb="select"] > div {
   border-radius: 10px !important;
@@ -194,6 +188,16 @@ def inject() -> None:
     st.markdown(_CSS, unsafe_allow_html=True)
 
 
+#: A 1x1 fully transparent PNG, passed to ``st.set_page_config(page_icon=...)``
+#: so the browser tab shows the title alone. Omitting ``page_icon`` is not
+#: enough — Streamlit then installs its own logo as the favicon.
+BLANK_ICON = (
+    "data:image/png;base64,"
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk"
+    "YPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="
+)
+
+
 def _esc(value: object) -> str:
     return html.escape(str(value if value is not None else ""))
 
@@ -234,11 +238,6 @@ def status_chip(label: str, tone: str = "off") -> None:
         f'<span class="iv-status {_esc(tone)}"><span class="dot"></span>{_esc(label)}</span>',
         unsafe_allow_html=True,
     )
-
-
-def button_hint(text: str) -> None:
-    """A small centered hint directly beneath a primary action."""
-    st.markdown(f'<p class="iv-btnhint">{_esc(text)}</p>', unsafe_allow_html=True)
 
 
 def progress(labels: List[str], current: int) -> None:

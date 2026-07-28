@@ -338,10 +338,43 @@ MODEL_CHOICES = {
 }
 
 
+#: Placeholder values that look like a configured key but are not one.
+_PLACEHOLDER_KEYS = {
+    "paste_your_real_groq_key_here",
+    "gsk_replace_me",
+    "aiza_replace_me",
+    "your_key_here",
+    "changeme",
+}
+
+
 def shared_api_key_for(provider: str) -> Optional[str]:
-    """The deployment-wide key, if the owner configured one."""
+    """The deployment-wide key, if the owner configured a real one.
+
+    Placeholder values from ``.env.example`` are treated as *absent* so the UI
+    surfaces "no key configured" instead of failing later with a confusing
+    auth error.
+    """
     env_name = _KEY_ENV.get(provider)
-    return get_secret(env_name) if env_name else None
+    if not env_name:
+        return None
+    key = get_secret(env_name)
+    if not key or key.strip().lower() in _PLACEHOLDER_KEYS:
+        return None
+    return key
+
+
+def custom_base_url() -> Optional[str]:
+    """A non-default endpoint, if one is configured.
+
+    Returned so the UI can say so out loud. A stub or proxy pointed at by
+    ``GROQ_BASE_URL`` otherwise looks identical to the real provider, which is
+    exactly how canned answers can masquerade as genuine model output.
+    """
+    override = get_secret("GROQ_BASE_URL")
+    if override and override.rstrip("/") != GroqProvider.DEFAULT_BASE_URL:
+        return override.rstrip("/")
+    return None
 
 
 def get_provider(
