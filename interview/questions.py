@@ -12,16 +12,10 @@ from interview.prompts import INTERVIEWER_SYSTEM_PROMPT
 #: Spoken-friendly cap. Long questions are unpleasant read aloud.
 MAX_QUESTION_CHARS = 320
 
-_FALLBACK_QUESTIONS = [
-    "To start, walk me through your background and what drew you to this role.",
-    "Tell me about a project you're proud of. What was your specific contribution?",
-    "Describe a technical problem that took you longer than expected. How did you work through it?",
-    "Tell me about a time you disagreed with a teammate. How did you resolve it?",
-    "What's a tradeoff you made recently, and what would you do differently now?",
-    "Where do you want to grow most in the next year, and why?",
-    "Tell me about a time you received difficult feedback. What changed afterward?",
-    "Looking back on your work so far, what's the biggest thing you've learned?",
-]
+#: Hard cap on how much prior transcript is replayed to the model. Without it a
+#: long interview can exceed the free tier's per-request token limit and start
+#: failing partway through.
+MAX_HISTORY_CHARS = 6000
 
 
 def _build_user_message(
@@ -30,11 +24,19 @@ def _build_user_message(
     question_idx: int,
     n_questions: int,
 ) -> str:
-    history_lines = []
-    for i, item in enumerate(qa_history, start=1):
+    # Build newest-first, then reverse, so truncation drops the *oldest* turns.
+    history_lines: List[str] = []
+    budget = MAX_HISTORY_CHARS
+    for i in range(len(qa_history), 0, -1):
+        item = qa_history[i - 1]
         question = str(item.get("q", "")).strip()
         answer = str(item.get("a", "")).strip()
-        history_lines.append(f"Q{i}: {question}\nA{i}: {answer}")
+        line = f"Q{i}: {question}\nA{i}: {answer}"
+        if len(line) > budget:
+            break
+        budget -= len(line)
+        history_lines.append(line)
+    history_lines.reverse()
 
     profile_block = {
         "job_field": profile.get("job_field", ""),
@@ -72,11 +74,6 @@ def _tidy(text: str) -> str:
     return cleaned
 
 
-def fallback_question(question_idx: int) -> str:
-    """A sane question to use when the provider is unreachable."""
-    return _FALLBACK_QUESTIONS[question_idx % len(_FALLBACK_QUESTIONS)]
-
-
 def generate_next_question(
     *,
     profile: Dict[str, Any],
@@ -89,9 +86,9 @@ def generate_next_question(
 ) -> str:
     """Generate the next question.
 
-    Raises :class:`interview.llm.LLMError` on provider failure; the caller
-    decides whether to surface a retry affordance or use
-    :func:`fallback_question`.
+    Raises :class:`interview.llm.LLMError` on provider failure, including when
+    the model returns nothing usable. There is deliberately no canned-question
+    fallback: a real interview is either adaptive or it is not worth running.
     """
     text = llm.generate(
         system=INTERVIEWER_SYSTEM_PROMPT,
@@ -105,4 +102,9 @@ def generate_next_question(
     )
 
     tidied = _tidy(text)
-    return tidied or fallback_question(question_idx)
+    if not tidied:
+        raise llm.LLMError(
+            "model returned an empty question",
+            "The interviewer didn't have a question ready. Please try again.",
+        )
+    return tidied
